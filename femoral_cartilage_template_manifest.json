@@ -1,0 +1,54 @@
+{
+  "data_root": "C:\\Users\\chris\\MICCAI2026\\OAI-ZIB-CM",
+  "split": "Tr",
+  "roi_id": 2,
+  "roi_name": "Femoral Cartilage",
+  "n_used": 25,
+  "sampled_cases": [
+    "oaizib_198_0000.nii",
+    "oaizib_389_0000.nii",
+    "oaizib_216_0000.nii",
+    "oaizib_021_0000.nii",
+    "oaizib_133_0000.nii",
+    "oaizib_262_0000.nii",
+    "oaizib_249_0000.nii",
+    "oaizib_208_0000.nii",
+    "oaizib_402_0000.nii",
+    "oaizib_156_0000.nii",
+    "oaizib_245_0000.nii",
+    "oaizib_184_0000.nii",
+    "oaizib_299_0000.nii",
+    "oaizib_112_0000.nii",
+    "oaizib_259_0000.nii",
+    "oaizib_072_0000.nii",
+    "oaizib_145_0000.nii",
+    "oaizib_387_0000.nii",
+    "oaizib_049_0000.nii",
+    "oaizib_317_0000.nii",
+    "oaizib_129_0000.nii",
+    "oaizib_273_0000.nii",
+    "oaizib_362_0000.nii",
+    "oaizib_309_0000.nii",
+    "oaizib_076_0000.nii"
+  ],
+  "preproc": {
+    "keep_largest_cc": true,
+    "mc_level": 0.5
+  },
+  "smoothing": {
+    "method": "taubin",
+    "iterations": 30,
+    "taubin_lambda": 0.5,
+    "taubin_mu": -0.53
+  },
+  "icp": {
+    "voxel_down": 0.8,
+    "max_iters": 100,
+    "threshold": 5.0
+  },
+  "offset_outer_mm": 2.0,
+  "outputs": {
+    "inner_mesh": "C:\\Users\\chris\\MICCAI2026\\Carti_Seg\\femoral_cartilage_template_inner.ply",
+    "outer_mesh": "C:\\Users\\chris\\MICCAI2026\\Carti_Seg\\femoral_cartilage_template_outer_offset2mm.ply"
+  }
+}
