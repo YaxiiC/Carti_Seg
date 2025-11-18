@@ -319,7 +319,7 @@ def main():
                 loss_ch = chamfer_distance(pred_inner, gt_v) * args.w_chamfer
                 loss_norm = normal_consistency(pred_inner, t_faces, gt_v, gt_n) * args.w_normal
                 loss_lap = uniform_laplacian_loss(pred_inner, t_faces) * args.w_lap
-                if dual and pred_outer is not None:
+                if dual and pred_outer is not None and args.w_thickness > 0.0:
                     loss_th = thickness_regularization(pred_inner, pred_outer, t_faces) * args.w_thickness
                 else:
                     loss_th = torch.tensor(0.0, device=device)
