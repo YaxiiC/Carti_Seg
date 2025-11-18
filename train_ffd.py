@@ -199,16 +199,6 @@ def main():
         device = torch.device("cpu")
         print(f"[Info] Using device: {device}")
 
-        
-        # Set the base device (e.g., cuda:0)
-        device = torch.device(args.device)
-        print(f"[Info] Using base device: {device}")
-        print(f"[Info] Number of GPUs available: {torch.cuda.device_count()}")
-        print(f"[Info] Using devices 0 and 1 via DataParallel.")
-
-    else:
-        device = torch.device("cpu")
-        print(f"[Info] Using device: {device}")
 
     # ... (lines 400-430 of the original script)
     # Template (inner, faces)
