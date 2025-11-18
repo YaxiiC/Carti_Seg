@@ -192,11 +192,13 @@ def main():
     # device
     # Explicitly set the base device and check for multiple GPUs
     if torch.cuda.is_available() and args.device.startswith("cuda"):
-        # Use DataParallel to utilize all available GPUs (0 and 1 in your case)
-        # The base device (e.g., cuda:0) will handle aggregation/loss calculation
-        if torch.cuda.device_count() >= 2 and args.batch_size < 2:
-            print("[Warning] Batch size should be at least 2 for 2 GPUs. Setting to 2.")
-            args.batch_size = 2
+        device = torch.device(args.device)
+        print(f"[Info] Using base device: {device}")
+        print(f"[Info] Number of GPUs available: {torch.cuda.device_count()}")
+    else:
+        device = torch.device("cpu")
+        print(f"[Info] Using device: {device}")
+
         
         # Set the base device (e.g., cuda:0)
         device = torch.device(args.device)
@@ -239,9 +241,12 @@ def main():
     # ----------------------------------------------------------------
     # Apply DataParallel: This is the KEY step for multi-GPU
     # ----------------------------------------------------------------
-    if device.type == 'cuda' and torch.cuda.device_count() > 1:
-        # DataParallel handles moving the model to GPUs and scattering inputs
-        model = torch.nn.DataParallel(model, device_ids=[0, 1]) 
+    if device.type == 'cuda' and torch.cuda.device_count() > 1 and args.batch_size > 1:
+        print("[Info] Using DataParallel on GPUs 0 and 1.")
+        model = torch.nn.DataParallel(model, device_ids=[0, 1])
+    else:
+        print("[Info] Not using DataParallel.")
+
     
     # Move the (potentially wrapped) model to the base device
     model.to(device)
