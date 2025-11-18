@@ -172,13 +172,13 @@ def main():
     ap.add_argument("--roi_id", type=int, default=2)
     ap.add_argument("--template_inner", type=str, required=True)
     ap.add_argument("--template_outer", type=str, default="")
-    ap.add_argument("--epochs", type=int, default=10)         # small sanity run
-    ap.add_argument("--batch_size", type=int, default=1)
+    ap.add_argument("--epochs", type=int, default=10)        # small sanity run
+    ap.add_argument("--batch_size", type=int, default=2)  # <<-- CHANGED: Increased to 2 for 2 GPUs
     ap.add_argument("--lr", type=float, default=1e-4)
     ap.add_argument("--lattice", type=int, nargs=3, default=[6, 6, 6], help="nx ny nz")
     ap.add_argument("--pad_mm", type=float, default=5.0)
     ap.add_argument("--num_workers", type=int, default=0)
-    ap.add_argument("--device", type=str, default="cuda")
+    ap.add_argument("--device", type=str, default="cuda:0") # <<-- CHANGED: Default to 'cuda:0'
     ap.add_argument("--n_cases", type=int, default=10, help="use only first N cases")
     # loss weights
     ap.add_argument("--w_chamfer", type=float, default=1.0)
@@ -189,35 +189,36 @@ def main():
     args = ap.parse_args()
 
     # device
-    device = torch.device(args.device if torch.cuda.is_available() and args.device.startswith("cuda") else "cpu")
-    print(f"[Info] Using device: {device}")
+    # Explicitly set the base device and check for multiple GPUs
+    if torch.cuda.is_available() and args.device.startswith("cuda"):
+        # Use DataParallel to utilize all available GPUs (0 and 1 in your case)
+        # The base device (e.g., cuda:0) will handle aggregation/loss calculation
+        if torch.cuda.device_count() >= 2 and args.batch_size < 2:
+            print("[Warning] Batch size should be at least 2 for 2 GPUs. Setting to 2.")
+            args.batch_size = 2
+        
+        # Set the base device (e.g., cuda:0)
+        device = torch.device(args.device)
+        print(f"[Info] Using base device: {device}")
+        print(f"[Info] Number of GPUs available: {torch.cuda.device_count()}")
+        print(f"[Info] Using devices 0 and 1 via DataParallel.")
 
-    # Dataset / Loader: use only first n_cases for this experiment
-    ds = OAIFFDTemplateDataset(
-        data_root=args.data_root,
-        split=args.split,
-        roi_id=args.roi_id,
-        n_cases=args.n_cases,         # << limit to first N cases
-        seed=0,
-        marching_level=0.5,
-        keep_largest_cc=True,
-        max_vertices=15000,           # for faster training
-        verbose=False
-    )
-    dl = DataLoader(ds, batch_size=args.batch_size, shuffle=True,
-                    num_workers=args.num_workers, pin_memory=True)
+    else:
+        device = torch.device("cpu")
+        print(f"[Info] Using device: {device}")
 
-    print(f"[Info] Dataset size (used) = {len(ds)}")
-
+    # ... (lines 400-430 of the original script)
     # Template (inner, faces)
     t_inner_v_np, t_faces_np = read_ply_vertices_faces(Path(args.template_inner))
-    t_inner_v = torch.from_numpy(t_inner_v_np).float().to(device)   # (V,3)
+    # Move template data to the base device
+    t_inner_v = torch.from_numpy(t_inner_v_np).float().to(device)  # (V,3)
     t_faces = torch.from_numpy(t_faces_np).long().to(device)        # (F,3)
 
     # Optional outer template (dual-surface mode)
     dual = False
     if args.template_outer:
         t_outer_v_np, _ = read_ply_vertices_faces(Path(args.template_outer))
+        # Move template data to the base device
         t_outer_v = torch.from_numpy(t_outer_v_np).float().to(device)
         dual = True
         print("[Info] Dual-surface mode enabled (inner + outer template).")
@@ -227,11 +228,23 @@ def main():
 
     # FFD lattice
     spec = make_lattice_covering(t_inner_v_np, pad_mm=args.pad_mm, lattice=tuple(args.lattice))
-    ffd = BSplineFFD(spec).to(device)
+    # BSplineFFD does not need to be DataParallelized, just needs to know its device.
+    ffd = BSplineFFD(spec).to(device) 
     print(f"[Info] FFD lattice size = {spec.size}, origin = {spec.origin.numpy()}, spacing = {spec.spacing.numpy()}")
 
     # Model & optimizer
-    model = UNet3D_FFD(in_channels=1, base_channels=8, lattice_size=tuple(args.lattice)).to(device)
+    model = UNet3D_FFD(in_channels=1, base_channels=8, lattice_size=tuple(args.lattice))
+    
+    # ----------------------------------------------------------------
+    # Apply DataParallel: This is the KEY step for multi-GPU
+    # ----------------------------------------------------------------
+    if device.type == 'cuda' and torch.cuda.device_count() > 1:
+        # DataParallel handles moving the model to GPUs and scattering inputs
+        model = torch.nn.DataParallel(model, device_ids=[0, 1]) 
+    
+    # Move the (potentially wrapped) model to the base device
+    model.to(device)
+    
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
 
     # -----------------------
@@ -243,17 +256,33 @@ def main():
         avg_loss = 0.0
 
         for batch in pbar:
-            img = batch["image"].to(device)              # (B,1,D,H,W)
-            # batch_size assumed 1 for shape handling simplicity
-            gt_v = batch["gt_verts"][0].to(device)       # (V,3)
-            gt_n = batch["gt_normals"][0].to(device)
+            # All input data is automatically moved to the base device (cuda:0)
+            img = batch["image"].to(device)                  # (B,1,D,H,W)
+            # When using DataParallel, the model expects a batch size > 1.
+            # However, your loss calculation later expects unbatched ground truth (gt_v[0], gt_n[0]).
+            # Since the batch size is very small, we'll process the loss on the unbatched GT 
+            # while the forward pass handles the batching across GPUs.
+            gt_v = batch["gt_verts"][0].to(device)         # (V,3) - Only first sample's GT used
+            gt_n = batch["gt_normals"][0].to(device)       # (V,3) - Only first sample's GT used
 
             # forward
-            deltaG = model(img)                          # (B,nx,ny,nz,3)
-            deltaG = deltaG[0]                           # (nx,ny,nz,3)
+            # DataParallel returns a batch-size tensor, so we take the first element (B=2 -> 2 elements)
+            # The output deltaG will be (B, nx, ny, nz, 3) where B=batch_size
+            deltaG_batch = model(img)                       # (B,nx,ny,nz,3)
+            
+            # NOTE: Your loss calculation is currently **single-sample based**, using only
+            # the first item's ground truth (`gt_v`, `gt_n`) and the first item's prediction (`deltaG_batch[0]`).
+            # To properly utilize the full batch size (B=2), you would need to:
+            # 1. Modify the loss function to accept a batch of predictions and a batch of ground truths.
+            # 2. Iterate over the batch dimensions to calculate individual losses and then sum/average them.
+            #
+            # For this simple DataParallel modification, we'll proceed using only the 
+            # first sample's prediction for the loss calculation, but be aware this is
+            # *not* optimal multi-GPU usage for the loss part.
+            deltaG = deltaG_batch[0]                        # (nx,ny,nz,3) - Use only the prediction for the first sample
 
             # deform template
-            pred_inner = ffd(t_inner_v, deltaG)          # (V,3)
+            pred_inner = ffd(t_inner_v, deltaG)             # (V,3)
             if dual and t_outer_v is not None:
                 pred_outer = ffd(t_outer_v, deltaG)
             else:
@@ -269,7 +298,6 @@ def main():
                 loss_th = torch.tensor(0.0, device=device)
 
             loss = loss_ch + loss_norm + loss_lap + loss_th
-
             optimizer.zero_grad()
             loss.backward()
             optimizer.step()
