@@ -178,6 +178,8 @@ def main():
     ap.add_argument("--epochs", type=int, default=10)        # small sanity run
     ap.add_argument("--batch_size", type=int, default=2)  # <<-- CHANGED: Increased to 2 for 2 GPUs
     ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--image_size", type=int, nargs=3, metavar=("D", "H", "W"), default=[128, 256, 256],
+                    help="Output 3D image size (after optional resizing). Use smaller sizes to save GPU memory.")
     ap.add_argument("--lattice", type=int, nargs=3, default=[6, 6, 6], help="nx ny nz")
     ap.add_argument("--pad_mm", type=float, default=5.0)
     ap.add_argument("--num_workers", type=int, default=0)
@@ -260,6 +262,7 @@ def main():
         split=args.split,
         roi_id=args.roi_id,
         n_cases=args.n_cases,
+        target_shape=tuple(args.image_size),
     )
 
     dl = DataLoader(
