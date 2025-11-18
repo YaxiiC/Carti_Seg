@@ -124,6 +124,7 @@ def evaluate_surfaces(model: UNet3D_FFD,
                       t_inner_v: torch.Tensor,
                       ds: OAIFFDTemplateDataset,
                       device: torch.device,
+                      amp_enabled: bool = False,
                       max_cases: int = 10,
                       tolerance_mm: float = 1.0):
     """
@@ -142,7 +143,8 @@ def evaluate_surfaces(model: UNet3D_FFD,
             gt_v = sample["gt_verts"].to(device)            # (V,3)
 
             # forward
-            deltaG = model(img)[0]                          # (nx,ny,nz,3)
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
+                deltaG = model(img)[0]                          # (nx,ny,nz,3)
             pred_inner = ffd(t_inner_v, deltaG)             # (V_template,3)
 
             # NOTE: pred_inner is deformed template; gt_v is GT surface from mask.
@@ -176,11 +178,17 @@ def main():
     ap.add_argument("--epochs", type=int, default=10)        # small sanity run
     ap.add_argument("--batch_size", type=int, default=2)  # <<-- CHANGED: Increased to 2 for 2 GPUs
     ap.add_argument("--lr", type=float, default=1e-4)
+    ap.add_argument("--image_size", type=int, nargs=3, metavar=("D", "H", "W"), default=[128, 256, 256],
+                    help="Output 3D image size (after optional resizing). Use smaller sizes to save GPU memory.")
     ap.add_argument("--lattice", type=int, nargs=3, default=[6, 6, 6], help="nx ny nz")
     ap.add_argument("--pad_mm", type=float, default=5.0)
     ap.add_argument("--num_workers", type=int, default=0)
     ap.add_argument("--device", type=str, default="cuda:0") # <<-- CHANGED: Default to 'cuda:0'
     ap.add_argument("--n_cases", type=int, default=10, help="use only first N cases")
+    ap.add_argument("--amp", action="store_true", default=True, help="use autocast mixed precision to reduce GPU memory")
+    ap.add_argument("--no_amp", action="store_false", dest="amp", help="disable mixed precision")
+    ap.add_argument("--data_parallel", action="store_true", default=True, help="enable DataParallel when multiple GPUs available")
+    ap.add_argument("--no_data_parallel", action="store_false", dest="data_parallel", help="force single-GPU training")
     # loss weights
     ap.add_argument("--w_chamfer", type=float, default=1.0)
     ap.add_argument("--w_normal", type=float, default=0.2)
@@ -231,22 +239,30 @@ def main():
     # ----------------------------------------------------------------
     # Apply DataParallel: This is the KEY step for multi-GPU
     # ----------------------------------------------------------------
-    if device.type == 'cuda' and torch.cuda.device_count() > 1 and args.batch_size > 1:
+    if args.data_parallel and device.type == 'cuda' and torch.cuda.device_count() > 1 and args.batch_size > 1:
         print("[Info] Using DataParallel on GPUs 0 and 1.")
         model = torch.nn.DataParallel(model, device_ids=[0, 1])
     else:
         print("[Info] Not using DataParallel.")
 
-    
+
     # Move the (potentially wrapped) model to the base device
     model.to(device)
-    
+
+    amp_enabled = bool(args.amp and device.type == "cuda")
+    if amp_enabled:
+        print("[Info] Mixed precision is enabled (autocast+GradScaler) to reduce GPU memory usage.")
+    else:
+        print("[Info] Mixed precision is disabled.")
+
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    scaler = torch.cuda.amp.GradScaler(enabled=amp_enabled)
     ds = OAIFFDTemplateDataset(
         data_root=args.data_root,
         split=args.split,
         roi_id=args.roi_id,
         n_cases=args.n_cases,
+        target_shape=tuple(args.image_size),
     )
 
     dl = DataLoader(
@@ -275,42 +291,48 @@ def main():
             gt_v = batch["gt_verts"][0].to(device)         # (V,3) - Only first sample's GT used
             gt_n = batch["gt_normals"][0].to(device)       # (V,3) - Only first sample's GT used
 
-            # forward
-            # DataParallel returns a batch-size tensor, so we take the first element (B=2 -> 2 elements)
-            # The output deltaG will be (B, nx, ny, nz, 3) where B=batch_size
-            deltaG_batch = model(img)                       # (B,nx,ny,nz,3)
-            
-            # NOTE: Your loss calculation is currently **single-sample based**, using only
-            # the first item's ground truth (`gt_v`, `gt_n`) and the first item's prediction (`deltaG_batch[0]`).
-            # To properly utilize the full batch size (B=2), you would need to:
-            # 1. Modify the loss function to accept a batch of predictions and a batch of ground truths.
-            # 2. Iterate over the batch dimensions to calculate individual losses and then sum/average them.
-            #
-            # For this simple DataParallel modification, we'll proceed using only the 
-            # first sample's prediction for the loss calculation, but be aware this is
-            # *not* optimal multi-GPU usage for the loss part.
-            deltaG = deltaG_batch[0]                        # (nx,ny,nz,3) - Use only the prediction for the first sample
+            with torch.cuda.amp.autocast(enabled=amp_enabled):
+                # forward
+                # DataParallel returns a batch-size tensor, so we take the first element (B=2 -> 2 elements)
+                # The output deltaG will be (B, nx, ny, nz, 3) where B=batch_size
+                deltaG_batch = model(img)                       # (B,nx,ny,nz,3)
 
-            # deform template
-            pred_inner = ffd(t_inner_v, deltaG)             # (V,3)
-            if dual and t_outer_v is not None:
-                pred_outer = ffd(t_outer_v, deltaG)
-            else:
-                pred_outer = None
+                # NOTE: Your loss calculation is currently **single-sample based**, using only
+                # the first item's ground truth (`gt_v`, `gt_n`) and the first item's prediction (`deltaG_batch[0]`).
+                # To properly utilize the full batch size (B=2), you would need to:
+                # 1. Modify the loss function to accept a batch of predictions and a batch of ground truths.
+                # 2. Iterate over the batch dimensions to calculate individual losses and then sum/average them.
+                #
+                # For this simple DataParallel modification, we'll proceed using only the
+                # first sample's prediction for the loss calculation, but be aware this is
+                # *not* optimal multi-GPU usage for the loss part.
+                deltaG = deltaG_batch[0]                        # (nx,ny,nz,3) - Use only the prediction for the first sample
 
-            # geometry losses
-            loss_ch = chamfer_distance(pred_inner, gt_v) * args.w_chamfer
-            loss_norm = normal_consistency(pred_inner, t_faces, gt_v, gt_n) * args.w_normal
-            loss_lap = uniform_laplacian_loss(pred_inner, t_faces) * args.w_lap
-            if dual and pred_outer is not None:
-                loss_th = thickness_regularization(pred_inner, pred_outer, t_faces) * args.w_thickness
-            else:
-                loss_th = torch.tensor(0.0, device=device)
+                # deform template
+                pred_inner = ffd(t_inner_v, deltaG)             # (V,3)
+                if dual and t_outer_v is not None:
+                    pred_outer = ffd(t_outer_v, deltaG)
+                else:
+                    pred_outer = None
 
-            loss = loss_ch + loss_norm + loss_lap + loss_th
+                # geometry losses
+                loss_ch = chamfer_distance(pred_inner, gt_v) * args.w_chamfer
+                loss_norm = normal_consistency(pred_inner, t_faces, gt_v, gt_n) * args.w_normal
+                loss_lap = uniform_laplacian_loss(pred_inner, t_faces) * args.w_lap
+                if dual and pred_outer is not None:
+                    loss_th = thickness_regularization(pred_inner, pred_outer, t_faces) * args.w_thickness
+                else:
+                    loss_th = torch.tensor(0.0, device=device)
+
+                loss = loss_ch + loss_norm + loss_lap + loss_th
             optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+            if amp_enabled:
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                loss.backward()
+                optimizer.step()
 
             avg_loss += loss.item()
             pbar.set_postfix({
@@ -330,6 +352,7 @@ def main():
         if epoch % 10 == 0:
             mean_dice, mean_hd95 = evaluate_surfaces(
                 model, ffd, t_inner_v, ds, device,
+                amp_enabled=amp_enabled,
                 max_cases=args.n_cases,
                 tolerance_mm=args.eval_tol_mm
             )

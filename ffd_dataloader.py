@@ -3,7 +3,7 @@
 ffd_dataloader.py  (debuggable)
 
 Run a quick step-by-step test:
-  python ffd_dataloader.py --data_root C:/Users/chris/MICCAI2026/OAI-ZIB-CM --split Tr --roi_id 2 --index 0 --max_vertices 15000 --verbose
+  python ffd_dataloader.py --data_root C:/Users/chris/MICCAI2026/OAI-ZIB-CM --split Tr --roi_id 2 --index 0 --max_vertices 5000 --verbose
 """
 
 from dataclasses import dataclass
@@ -14,6 +14,7 @@ import numpy as np
 import nibabel as nib
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset
 from skimage.measure import marching_cubes, label as cc_label
 import random
@@ -292,13 +293,15 @@ class OAIFFDTemplateDataset(Dataset):
                  seed: int = 0,
                  marching_level: float = 0.5,
                  keep_largest_cc: bool = True,
-                 max_vertices: Optional[int] = 20000,
+                 max_vertices: Optional[int] = 5000,
+                 target_shape: Optional[Tuple[int, int, int]] = None,
                  verbose: bool = False):
         self.data_root = Path(data_root)
         self.roi_id = int(roi_id)
         self.marching_level = marching_level
         self.keep_largest_cc = keep_largest_cc
         self.max_vertices = max_vertices
+        self.target_shape = tuple(target_shape) if target_shape is not None else None
         self.verbose = verbose
         self.pairs = find_pairs(self.data_root, split=split, verbose=verbose)
         if n_cases is not None:
@@ -306,7 +309,8 @@ class OAIFFDTemplateDataset(Dataset):
             self.pairs = random.sample(self.pairs, min(n_cases, len(self.pairs)))
         self.rng_seed = seed
         if self.verbose:
-            print(f"[Dataset] init -> n_pairs={len(self.pairs)}, roi_id={self.roi_id}, level={self.marching_level}, max_vertices={self.max_vertices}")
+            resize_str = f", target_shape={self.target_shape}" if self.target_shape is not None else ""
+            print(f"[Dataset] init -> n_pairs={len(self.pairs)}, roi_id={self.roi_id}, level={self.marching_level}, max_vertices={self.max_vertices}{resize_str}")
 
     def __len__(self):
         return len(self.pairs)
@@ -321,6 +325,7 @@ class OAIFFDTemplateDataset(Dataset):
         vol = img.get_fdata().astype(np.float32)
         lab_np = lab.get_fdata()
         spacing = nii_spacing_from_affine(img.affine)
+        orig_shape = vol.shape
 
         if self.verbose:
             print(f"[Sample {idx}] volume shape={vol.shape}, spacing(mm)={spacing.tolist()}")
@@ -328,6 +333,15 @@ class OAIFFDTemplateDataset(Dataset):
         vol = zscore(vol)
         if self.verbose:
             print(f"[Sample {idx}] volume z-scored: mean~{float(vol.mean()):.3f}, std~{float(vol.std()):.3f}")
+
+        if self.target_shape is not None:
+            vol_t = torch.from_numpy(vol[None, None, ...])
+            vol_t = F.interpolate(vol_t, size=self.target_shape, mode="trilinear", align_corners=False)
+            vol = vol_t.squeeze(0).squeeze(0).numpy()
+            scale = np.array(orig_shape, dtype=np.float32) / np.array(self.target_shape, dtype=np.float32)
+            spacing = spacing * scale
+            if self.verbose:
+                print(f"[Sample {idx}] resized volume to {self.target_shape}, new spacing(mm)={spacing.tolist()}")
 
         mask = roi_mask_from_label(lab_np, self.roi_id, keep_largest_cc=self.keep_largest_cc, verbose=self.verbose)
         m = mesh_from_mask(mask, spacing, level=self.marching_level, verbose=self.verbose)
@@ -399,7 +413,7 @@ if __name__ == "__main__":
     ap.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
     ap.add_argument("--roi_id", type=int, default=2)
     ap.add_argument("--index", type=int, default=0, help="sample index to fetch")
-    ap.add_argument("--max_vertices", type=int, default=20000)
+    ap.add_argument("--max_vertices", type=int, default=5000)
     ap.add_argument("--marching_level", type=float, default=0.5)
     ap.add_argument("--keep_largest_cc", action="store_true")
     ap.add_argument("--verbose", action="store_true")
