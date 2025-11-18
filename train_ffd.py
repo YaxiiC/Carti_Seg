@@ -232,7 +232,7 @@ def main():
     print(f"[Info] FFD lattice size = {spec.size}, origin = {spec.origin.numpy()}, spacing = {spec.spacing.numpy()}")
 
     # Model & optimizer
-    model = UNet3D_FFD(in_channels=1, base_channels=8, lattice_size=tuple(args.lattice))
+    model = UNet3D_FFD(in_channels=1, base_channels=4, lattice_size=tuple(args.lattice))
     
     # ----------------------------------------------------------------
     # Apply DataParallel: This is the KEY step for multi-GPU
