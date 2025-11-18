@@ -28,7 +28,8 @@ from tqdm import tqdm
 
 from ffd_dataloader import (
     OAIFFDTemplateDataset, LatticeSpec, BSplineFFD,
-    chamfer_distance, normal_consistency, uniform_laplacian_loss, thickness_regularization
+    chamfer_distance, normal_consistency, uniform_laplacian_loss, thickness_regularization,
+    collate_fn_variable_mesh, 
 )
 from ffd_model import UNet3D_FFD
 
@@ -246,6 +247,20 @@ def main():
     model.to(device)
     
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    ds = OAIFFDTemplateDataset(
+        data_root=args.data_root,
+        split=args.split,
+        roi_id=args.roi_id,
+        n_cases=args.n_cases,
+    )
+
+    dl = DataLoader(
+        ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        collate_fn=collate_fn_variable_mesh,
+    )
 
     # -----------------------
     # Training
