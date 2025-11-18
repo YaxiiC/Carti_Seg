@@ -4,6 +4,7 @@ ffd_dataloader.py  (debuggable)
 
 Run a quick step-by-step test:
   python ffd_dataloader.py --data_root C:/Users/chris/MICCAI2026/OAI-ZIB-CM --split Tr --roi_id 2 --index 0 --max_vertices 5000 --verbose
+  python ffd_dataloader.py --data_root C:/Users/chris/MICCAI2026/OAI-ZIB-CM --split Tr --roi_id 2 --index 0 --max_vertices 5000 --verbose
 """
 
 from dataclasses import dataclass
@@ -14,6 +15,7 @@ import numpy as np
 import nibabel as nib
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.nn.functional as F
 from torch.utils.data import Dataset
 from skimage.measure import marching_cubes, label as cc_label
@@ -293,11 +295,7 @@ class OAIFFDTemplateDataset(Dataset):
                  seed: int = 0,
                  marching_level: float = 0.5,
                  keep_largest_cc: bool = True,
-<<<<<<< ours
-                 max_vertices: Optional[int] = 20000,
-=======
                  max_vertices: Optional[int] = 5000,
->>>>>>> theirs
                  target_shape: Optional[Tuple[int, int, int]] = None,
                  verbose: bool = False):
         self.data_root = Path(data_root)
@@ -417,6 +415,7 @@ if __name__ == "__main__":
     ap.add_argument("--split", type=str, default="Tr", choices=["Tr", "Ts"])
     ap.add_argument("--roi_id", type=int, default=2)
     ap.add_argument("--index", type=int, default=0, help="sample index to fetch")
+    ap.add_argument("--max_vertices", type=int, default=5000)
     ap.add_argument("--max_vertices", type=int, default=5000)
     ap.add_argument("--marching_level", type=float, default=0.5)
     ap.add_argument("--keep_largest_cc", action="store_true")
