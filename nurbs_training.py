@@ -523,7 +523,7 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
         in_channels=1,
         n_ctrl=template.n_ctrl,
         predict_weights=predict_weights,
-        base_channels=16,   # 原来是 32，先减半
+        base_channels=16 # 原来是 32，先减半
     ).to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
