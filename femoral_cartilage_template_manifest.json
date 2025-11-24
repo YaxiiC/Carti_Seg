@@ -46,9 +46,26 @@
     "max_iters": 100,
     "threshold": 5.0
   },
-  "offset_outer_mm": 2.0,
+  "default_thickness_mm": 2.0,
+  "representation": {
+    "type": "central_surface_plus_thickness",
+    "description": "Central NURBS cartilage surface S_c(u,v) with a default thickness field T^0(u,v) in mm. Inner/outer surfaces can be reconstructed as S_inner = S_c - 0.5*T*n, S_outer = S_c + 0.5*T*n.",
+    "thickness_grid_shape": [
+      80,
+      64
+    ]
+  },
+  "nurbs": {
+    "degree_u": 3,
+    "degree_v": 3,
+    "n_ctrl_u": 10,
+    "n_ctrl_v": 8,
+    "eval_res_u": 80,
+    "eval_res_v": 64
+  },
   "outputs": {
-    "inner_mesh": "C:\\Users\\chris\\MICCAI2026\\Carti_Seg\\femoral_cartilage_template_inner.ply",
-    "outer_mesh": "C:\\Users\\chris\\MICCAI2026\\Carti_Seg\\femoral_cartilage_template_outer_offset2mm.ply"
+    "central_mesh": "C:\\Users\\chris\\MICCAI2026\\Carti_Seg\\femoral_cartilage_template_central.ply",
+    "thickness_default": "C:\\Users\\chris\\MICCAI2026\\Carti_Seg\\femoral_cartilage_template_thickness_default.npy",
+    "nurbs_params": "C:\\Users\\chris\\MICCAI2026\\Carti_Seg\\femoral_cartilage_template_nurbs_params.npz"
   }
 }
