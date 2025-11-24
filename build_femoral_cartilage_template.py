@@ -7,6 +7,7 @@ Single-file template builder restricted to ROI=2 (Femoral Cartilage) from OAI-ZI
 Workflow:
   multi-label NIfTI -> (mask==2) -> marching cubes -> smoothing -> rigid ICP -> mean surface
   -> optional outer surface by normal offset (~2 mm)
+  -> central surface (mean of inner/outer) and per-vertex thickness map
 
 Run (Windows CMD, one line):
   python build_femoral_cartilage_template.py --data_root C:\path\to\OAI-ZIB-CM --out_dir C:\path\to\Carti_Seg --split Tr --n_cases 25 --roi_id 2 --keep_largest_cc --offset_outer_mm 2.0
@@ -159,6 +160,36 @@ def offset_surface_along_normals(mesh: o3d.geometry.TriangleMesh, offset_mm: flo
     m.compute_vertex_normals()
     return m
 
+def compute_central_surface_and_thickness(
+    inner_mesh: o3d.geometry.TriangleMesh,
+    outer_mesh: o3d.geometry.TriangleMesh
+):
+    """
+    Given inner and outer surfaces with identical topology, compute:
+      - central surface: vertex-wise average
+      - thickness map: per-vertex Euclidean distance between inner and outer vertices
+    """
+    vin = np.asarray(inner_mesh.vertices)
+    vout = np.asarray(outer_mesh.vertices)
+
+    if vin.shape != vout.shape:
+        raise ValueError("Inner and outer meshes must have the same number of vertices for central surface computation.")
+
+    # Central vertices = mean of inner and outer vertices
+    v_central = 0.5 * (vin + vout)
+
+    central_mesh = o3d.geometry.TriangleMesh(
+        vertices=o3d.utility.Vector3dVector(v_central),
+        triangles=o3d.utility.Vector3iVector(np.asarray(inner_mesh.triangles))
+    )
+    central_mesh.remove_degenerate_triangles()
+    central_mesh.compute_vertex_normals()
+
+    # Per-vertex thickness (Euclidean distance)
+    thickness = np.linalg.norm(vout - vin, axis=1)  # shape: (N,)
+
+    return central_mesh, thickness
+
 # ------- filename pairing (handles _0000 vs no-suffix) -------
 
 def _canonical_stem(p: Path) -> str:
@@ -305,22 +336,65 @@ def build_template_for_roi(
     print("Computing mean template on reference topology...")
     mean_mesh = average_on_reference_topology(ref_mesh, aligned, k=1)
 
-    # Inner (template) and outer (offset)
+    # Base template surface (treated as inner surface here)
     inner_mesh = smooth_mesh(mean_mesh, method=smooth_method,
                              iterations=max(1, smooth_iters // 2),
                              lambda_=taubin_lambda, mu=taubin_mu)
 
     outer_mesh = None
+    central_mesh = None
+    thickness = None
+
     if offset_outer_mm and offset_outer_mm > 0:
+        # Generate outer surface
         outer_mesh = offset_surface_along_normals(inner_mesh, offset_mm=offset_outer_mm)
         outer_mesh = smooth_mesh(outer_mesh, method=smooth_method,
                                  iterations=max(1, smooth_iters // 3),
                                  lambda_=taubin_lambda, mu=taubin_mu)
 
+        # Central surface + per-vertex thickness
+        central_mesh, thickness = compute_central_surface_and_thickness(inner_mesh, outer_mesh)
+    else:
+        # If no outer offset, treat the smoothed mean mesh as central surface
+        central_mesh = inner_mesh
+        thickness = None
+
     # Save
     base = f"{label_name.lower().replace(' ', '_')}_template"
+
+    outputs = {}
+
+    # Inner surface
     inner_path = out_dir / f"{base}_inner.ply"
     o3d.io.write_triangle_mesh(str(inner_path), inner_mesh)
+    outputs["inner_mesh"] = str(inner_path)
+
+    # Outer surface (if any)
+    if outer_mesh is not None:
+        outer_path = out_dir / f"{base}_outer_offset{int(round(offset_outer_mm))}mm.ply"
+        o3d.io.write_triangle_mesh(str(outer_path), outer_mesh)
+        outputs["outer_mesh"] = str(outer_path)
+
+    # Central surface
+    central_path = out_dir / f"{base}_central.ply"
+    o3d.io.write_triangle_mesh(str(central_path), central_mesh)
+    outputs["central_mesh"] = str(central_path)
+
+    # Thickness map (.npy) and optional colored central mesh
+    thickness_path = None
+    if thickness is not None:
+        thickness_path = out_dir / f"{base}_thickness.npy"
+        np.save(thickness_path, thickness.astype(np.float32))
+        outputs["thickness_map"] = str(thickness_path)
+
+        # Optional: add grayscale thickness as vertex color for visualization
+        t_norm = thickness / (thickness.max() + 1e-8)
+        colors = np.stack([t_norm, t_norm, t_norm], axis=1)  # grayscale RGB
+        central_colored = o3d.geometry.TriangleMesh(central_mesh)
+        central_colored.vertex_colors = o3d.utility.Vector3dVector(colors)
+        colored_central_path = out_dir / f"{base}_central_colored_thickness.ply"
+        o3d.io.write_triangle_mesh(str(colored_central_path), central_colored)
+        outputs["central_mesh_colored_thickness"] = str(colored_central_path)
 
     manifest = {
         "data_root": str(data_root),
@@ -345,15 +419,8 @@ def build_template_for_roi(
             "threshold": icp_threshold
         },
         "offset_outer_mm": float(offset_outer_mm),
-        "outputs": {
-            "inner_mesh": str(inner_path)
-        }
+        "outputs": outputs
     }
-
-    if outer_mesh is not None:
-        outer_path = out_dir / f"{base}_outer_offset{int(round(offset_outer_mm))}mm.ply"
-        o3d.io.write_triangle_mesh(str(outer_path), outer_mesh)
-        manifest["outputs"]["outer_mesh"] = str(outer_path)
 
     with open(out_dir / f"{base}_manifest.json", "w") as f:
         json.dump(manifest, f, indent=2)
@@ -361,7 +428,10 @@ def build_template_for_roi(
     print("\nDone.")
     print(f"Saved inner template: {inner_path}")
     if outer_mesh is not None:
-        print(f"Saved outer template: {manifest['outputs']['outer_mesh']}")
+        print(f"Saved outer template: {outputs['outer_mesh']}")
+    print(f"Saved central template: {central_path}")
+    if thickness_path is not None:
+        print(f"Saved thickness map: {thickness_path}")
     print(f"Manifest: {out_dir / (base + '_manifest.json')}")
 
 # ----------------------------

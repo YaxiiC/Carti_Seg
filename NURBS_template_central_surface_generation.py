@@ -317,19 +317,36 @@ def open_uniform_knots(n_ctrl: int, degree: int) -> np.ndarray:
             U[degree + j] = j / (n_inner + 1)
     return U
 
+def _find_knot_span(u: float, degree: int, knots: np.ndarray, n_ctrl: int) -> int:
+    """Classic knot-span search from Piegl & Tiller (Algorithm A2.1)."""
+    u = float(np.clip(u, knots[0], knots[-1]))
+    if np.isclose(u, knots[-1]):
+        return n_ctrl - 1
+
+    low = degree
+    high = n_ctrl
+    mid = (low + high) // 2
+    while u < knots[mid] or u >= knots[mid + 1]:
+        if u < knots[mid]:
+            high = mid
+        else:
+            low = mid
+        mid = (low + high) // 2
+    return mid
+
+
 def bspline_basis_vector(u: float, degree: int, knots: np.ndarray, n_ctrl: int) -> np.ndarray:
     """
-    Evaluate all B-spline basis functions N_i,p(u) for i=0..n_ctrl-1 at scalar u.
+    Evaluate all non-zero B-spline basis functions N_i,p(u) for i=0..n_ctrl-1.
 
-    Implementation: standard Cox–de Boor, using local basis and placing it
-    into the global vector according to knot span.
+    This implementation mirrors Piegl & Tiller (Algorithm A2.2) to guarantee
+    partition of unity. The previous ad-hoc searchsorted implementation could
+    miss the correct span for values near repeated knots, producing basis
+    vectors whose weights did not sum to 1.0. That led to wildly scaled
+    control points and a collapsed (line-like) central surface when the mesh
+    was evaluated.
     """
-    u = float(np.clip(u, 0.0, 1.0))
-    # Special-case right boundary
-    if np.isclose(u, knots[-1]):
-        span = n_ctrl - 1
-    else:
-        span = max(degree, min(np.searchsorted(knots, u) - 1, n_ctrl - 1))
+    span = _find_knot_span(u, degree, knots, n_ctrl)
 
     left = np.zeros(degree + 1, dtype=np.float64)
     right = np.zeros(degree + 1, dtype=np.float64)
@@ -342,10 +359,7 @@ def bspline_basis_vector(u: float, degree: int, knots: np.ndarray, n_ctrl: int) 
         saved = 0.0
         for r in range(j):
             denom = right[r + 1] + left[j - r]
-            if denom == 0.0:
-                temp = 0.0
-            else:
-                temp = N[r] / denom
+            temp = 0.0 if denom == 0.0 else N[r] / denom
             N[r] = saved + right[r + 1] * temp
             saved = left[j - r] * temp
         N[j] = saved
@@ -557,12 +571,29 @@ def build_template_for_roi(
     print("Fitting cubic tensor-product B-spline surface (central NURBS template)...")
     central_verts = np.asarray(central_mesh_mc.vertices)   # (V,3)
 
-    # 1) Parameterize vertices -> (u,v) in [0,1]^2
-    uv = pca_parameterize_vertices(central_verts)          # (V,2)
+    # --- Debug: 看一下原始 mean mesh 的 bbox ---
+    vmin = central_verts.min(axis=0)
+    vmax = central_verts.max(axis=0)
+    print("central_mesh_mc bbox (before NURBS):")
+    print("  min:", vmin)
+    print("  max:", vmax)
+    print("  extent:", vmax - vmin)
 
-    # 2) Fit B-spline surface (degrees typically 3,3)
-    ctrl_pts, weights, knots_u, knots_v = fit_bspline_surface(
-        central_verts,
+    # 0) 先做一个简单的居中 + 归一化（只在拟合时用，方便数值稳定）
+    center = central_verts.mean(axis=0, keepdims=True)
+    extent = vmax - vmin
+    scale = float(extent.max())  # 用最大边长做全局缩放因子
+    if scale < 1e-6:
+        scale = 1.0
+
+    verts_norm = (central_verts - center) / scale
+
+    # 1) PCA 参数化：对归一化后的点做 PCA
+    uv = pca_parameterize_vertices(verts_norm)          # (V,2)
+
+    # 2) 用归一化后的坐标拟合 B-spline
+    ctrl_pts_norm, weights, knots_u, knots_v = fit_bspline_surface(
+        verts_norm,
         uv,
         degree_u=nurbs_degree_u,
         degree_v=nurbs_degree_v,
@@ -570,7 +601,10 @@ def build_template_for_roi(
         n_ctrl_v=nurbs_ctrl_v,
     )
 
-    # 3) Evaluate surface on regular (u,v) grid to build central template mesh
+    # 3) 把控制点从归一化坐标还原回物理坐标
+    ctrl_pts = ctrl_pts_norm * scale + center  # (n_ctrl_u, n_ctrl_v, 3)
+
+    # 4) 在规则 (u,v) 网格上评估得到 central 模板
     central_eval_verts, central_eval_faces = evaluate_bspline_surface_grid(
         ctrl_pts,
         knots_u,
@@ -587,6 +621,13 @@ def build_template_for_roi(
     )
     central_mesh.remove_degenerate_triangles()
     central_mesh.compute_vertex_normals()
+
+    # Debug: 看一下最后 central_mesh 的 bbox
+    cv = central_eval_verts
+    print("central_eval_verts bbox (after NURBS):")
+    print("  min:", cv.min(axis=0))
+    print("  max:", cv.max(axis=0))
+    print("  extent:", cv.max(axis=0) - cv.min(axis=0))
 
     # -------------------------------------------------
     # Thickness field on (u,v): default constant thickness in mm
