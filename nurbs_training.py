@@ -593,6 +593,17 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
 
 
 if __name__ == "__main__":
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Train cartilage NURBS model")
+    parser.add_argument(
+        "--max-samples",
+        type=int,
+        default=None,
+        help="Optional limit on number of image–label pairs to use (default: all)",
+    )
+    args = parser.parse_args()
+
     base = Path.home() / "OAI-ZIB-CM-ICP" / "aligned"
     volume_dir = base / "imagesTr"
     seg_dir    = base / "labelsTr"
@@ -601,8 +612,8 @@ if __name__ == "__main__":
     seg_paths    = sorted(seg_dir.glob("*.nii.gz"))
     pairs = list(zip(volume_paths, seg_paths))
 
-    # 🔹 use only the first 5 image–label pairs
-    pairs = pairs[:5]
+    if args.max_samples is not None:
+        pairs = pairs[: args.max_samples]
 
     # 默认使用由 fit_nurbs_from_central_template_2patch.py 生成的双 patch 模板
     default_templates = [
