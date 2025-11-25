@@ -23,6 +23,10 @@ import torch.nn.functional as F
 from skimage import measure
 
 
+# 固定的长轴方向（与 fit_nurbs_from_central_template_2patch.py 保持一致），用于两 patch 模板的排列
+PC_LONG = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+
 # -----------------------------
 # 3D U-Net backbone
 # -----------------------------
@@ -162,16 +166,47 @@ class NURBSTemplate:
     weights: torch.Tensor  # (nu, nv)
     uv_grid: torch.Tensor  # (num_samples, 2)
 
+    @staticmethod
+    def _canonical_uv_grid(
+        knots_u: np.ndarray,
+        knots_v: np.ndarray,
+        degree_u: int,
+        degree_v: int,
+        uv_grid: Optional[np.ndarray] = None,
+        samples_u: int = 48,
+        samples_v: int = 48,
+    ) -> np.ndarray:
+        """Return a meshgrid-flattened UV grid even if the npz lacks it."""
+
+        def _default_samples(knots: np.ndarray, degree: int, n_samples: int) -> np.ndarray:
+            u_min = float(knots[degree])
+            u_max = float(knots[-degree - 1])
+            return np.linspace(u_min, u_max, n_samples, dtype=np.float32)
+
+        if uv_grid is None:
+            u = _default_samples(knots_u, degree_u, samples_u)
+            v = _default_samples(knots_v, degree_v, samples_v)
+        else:
+            uv_grid = np.asarray(uv_grid, dtype=np.float32)
+            u = np.unique(uv_grid[:, 0])
+            v = np.unique(uv_grid[:, 1])
+
+        uu, vv = np.meshgrid(u, v, indexing="ij")
+        return np.stack([uu.reshape(-1), vv.reshape(-1)], axis=1)
+
     @classmethod
     def from_npz(cls, path: Path, device: torch.device) -> "NURBSTemplate":
         data = np.load(path)
         ctrlpts = torch.from_numpy(data["ctrlpts"]).to(torch.float32).to(device)
         weights = torch.from_numpy(data.get("weights", np.ones(ctrlpts.shape[:2], dtype=np.float32))).to(device)
-        knots_u = torch.from_numpy(data["knots_u"]).to(torch.float32).to(device)
-        knots_v = torch.from_numpy(data["knots_v"]).to(torch.float32).to(device)
+        knots_u_np = data["knots_u"]
+        knots_v_np = data["knots_v"]
+        knots_u = torch.from_numpy(knots_u_np).to(torch.float32).to(device)
+        knots_v = torch.from_numpy(knots_v_np).to(torch.float32).to(device)
         degree_u = int(data["degree_u"])
         degree_v = int(data["degree_v"])
-        uv_grid = torch.from_numpy(data["uv_grid"]).to(torch.float32).to(device)
+        uv_grid_np = cls._canonical_uv_grid(knots_u_np, knots_v_np, degree_u, degree_v, data.get("uv_grid"))
+        uv_grid = torch.from_numpy(uv_grid_np).to(torch.float32).to(device)
         return cls(ctrlpts=ctrlpts, knots_u=knots_u, knots_v=knots_v, degree_u=degree_u, degree_v=degree_v, weights=weights, uv_grid=uv_grid)
 
     @property
@@ -201,11 +236,17 @@ class NURBSTemplate:
                     L[idx, n_idx] = -1
         return L
 
+    def _uv_samples(self) -> Tuple[torch.Tensor, torch.Tensor]:
+        """Return sorted unique u/v samples implied by the stored UV grid."""
+
+        u = torch.unique(self.uv_grid[:, 0], sorted=True)
+        v = torch.unique(self.uv_grid[:, 1], sorted=True)
+        return u, v
+
     def basis_matrices(self) -> Tuple[torch.Tensor, torch.Tensor]:
         """Pre-compute basis matrices for the stored UV samples."""
 
-        u = self.uv_grid[:, 0]
-        v = self.uv_grid[:, 1]
+        u, v = self._uv_samples()
         basis_u = bspline_basis_one_dim(self.knots_u, self.degree_u, u)
         basis_v = bspline_basis_one_dim(self.knots_v, self.degree_v, v)
         return basis_u, basis_v
@@ -261,10 +302,14 @@ class NURBSTemplate:
 class MultiPatchNURBSTemplate:
     def __init__(self, templates: Sequence[NURBSTemplate]):
         self.templates = templates
+        # 保持与模板生成时相同的长轴方向，便于后续需要按照 patch 顺序做后处理（如厚度或可视化）
+        self.pc_long = torch.from_numpy(PC_LONG).to(torch.float32)
 
     @classmethod
     def from_paths(cls, paths: Sequence[Path], device: torch.device) -> "MultiPatchNURBSTemplate":
-        templates = [NURBSTemplate.from_npz(p, device) for p in paths]
+        # 默认按文件名排序，确保 patch0 / patch1 的顺序与固定长轴分割一致
+        sorted_paths = sorted(paths)
+        templates = [NURBSTemplate.from_npz(p, device) for p in sorted_paths]
         return cls(templates)
 
     @property
@@ -539,17 +584,23 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
 
 
 if __name__ == "__main__":
-    volume_paths = sorted(Path(r"C:\Users\chris\MICCAI2026\OAI-ZIB-CM-ICP\aligned\imagesTr").glob("*.nii.gz"))
-    seg_paths    = sorted(Path(r"C:\Users\chris\MICCAI2026\OAI-ZIB-CM-ICP\aligned\labelsTr").glob("*.nii.gz"))
+    volume_paths = sorted(Path(r"home\yaxi\OAI-ZIB-CM-ICP\aligned\imagesTr").glob("*.nii.gz"))
+    seg_paths = sorted(Path(r"home\yaxi\OAI-ZIB-CM-ICP\aligned\labelsTr").glob("*.nii.gz"))
     pairs = list(zip(volume_paths, seg_paths))
 
     # 🔹 use only the first 5 image–label pairs
     pairs = pairs[:5]
 
+    # 默认使用由 fit_nurbs_from_central_template_2patch.py 生成的双 patch 模板
+    default_templates = [
+        Path("femoral_template_surf_patch0.npz"),
+        Path("femoral_template_surf_patch1.npz"),
+    ]
+
     if pairs:
         example_training_loop(
             pairs,
-            [Path("femoral_template_surf.npz")],
+            default_templates,
             predict_weights=False,
             epochs=2,
         )
