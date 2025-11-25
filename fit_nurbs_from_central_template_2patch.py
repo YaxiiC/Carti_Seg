@@ -29,7 +29,7 @@ Example:
 python fit_nurbs_from_central_template_2patch.py ^
   --central_mesh C:\Users\chris\MICCAI2026\Carti_Seg\average_mesh.ply ^
   --out_dir      C:\Users\chris\MICCAI2026\Carti_Seg ^
-  --size_u 100 --size_v 100 ^
+  --size_u 30 --size_v 30 ^
   --n_patches 2
 """
 
