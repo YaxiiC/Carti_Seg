@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python 
 # -*- coding: utf-8 -*-
 r"""
 Fit cubic tensor-product B-spline (NURBS) surfaces to the central femoral
@@ -7,8 +7,8 @@ and verify the fitting accuracy in 3D via Chamfer distance.
 
 结构性改进：多 patch NURBS 模板
 ----------------------------------------------------
-1. 对 central template 做 PCA，得到长轴方向 pc_long；
-2. 沿 pc_long 方向，用投影值把三角面片划分为 2 或 3 段（patch）：
+1. 用固定世界坐标 X 轴作为“长轴方向”；
+2. 沿 X 轴方向，用投影值把三角面片划分为 2 或 3 段（patch）：
    - n_patches=2: 左半 / 右半
    - n_patches=3: 左 / 中 / 右
 3. 对每个 patch 的子网格：
@@ -29,7 +29,7 @@ Example:
 python fit_nurbs_from_central_template_2patch.py ^
   --central_mesh C:\Users\chris\MICCAI2026\Carti_Seg\average_mesh.ply ^
   --out_dir      C:\Users\chris\MICCAI2026\Carti_Seg ^
-  --size_u 200 --size_v 200 ^
+  --size_u 100 --size_v 100 ^
   --n_patches 2
 """
 
@@ -114,14 +114,14 @@ def parse_args():
 
 
 # -------------------------------------------------------------------------
-# 工具：mesh 划分为多个 patch
+# 工具：mesh 划分为多个 patch（使用固定 X 轴）
 # -------------------------------------------------------------------------
 def split_mesh_longitudinal(
     mesh: o3d.geometry.TriangleMesh,
     n_patches: int = 2,
 ):
     """
-    沿长轴（PCA 第一主方向）将 mesh 按三角面片划分为 2 或 3 个子 mesh。
+    沿固定世界坐标 X 轴将 mesh 按三角面片划分为 2 或 3 个子 mesh。
 
     返回:
       patch_meshes: List[TriangleMesh], 长度 = n_patches
@@ -132,13 +132,14 @@ def split_mesh_longitudinal(
     if verts.shape[0] == 0 or faces.shape[0] == 0:
         raise RuntimeError("Mesh is empty, cannot split.")
 
-    # PCA 找长轴
+    # 用顶点中心化，仅影响一个常数偏移，不影响根据投影排序/分段
     center = verts.mean(axis=0, keepdims=True)
     verts_centered = verts - center
-    _, _, Vt = np.linalg.svd(verts_centered, full_matrices=False)
-    pc_long = Vt[0]  # 长轴方向
 
-    # 顶点在长轴上的投影
+    # 固定“长轴方向”为世界坐标 X 轴
+    pc_long = np.array([0.0,1.0, 0.0], dtype=np.float64)
+
+    # 顶点在固定长轴上的投影
     proj = verts_centered @ pc_long  # (N,)
 
     # 用面心的投影值决定每个 face 属于哪个 patch
@@ -191,7 +192,8 @@ def split_mesh_longitudinal(
             f"Patch {k}: {verts_k.shape[0]} vertices, {faces_k_new.shape[0]} faces."
         )
 
-    return patch_meshes
+    return patch_meshes, pc_long
+
 
 
 # -------------------------------------------------------------------------
@@ -201,6 +203,7 @@ def build_quad_control_mesh_from_template(
     mesh: o3d.geometry.TriangleMesh,
     size_u: int,
     size_v: int,
+    long_axis: np.ndarray | None = None,
 ):
     """
     从 patch mesh 构造一个规则的 size_u x size_v 控制点网格（quad 控制网格）：
@@ -220,6 +223,23 @@ def build_quad_control_mesh_from_template(
     U, S, Vt = np.linalg.svd(verts_centered, full_matrices=False)
     pc1 = Vt[0]
     pc2 = Vt[1]
+
+    if long_axis is not None:
+        ref_u = long_axis.astype(np.float64)
+        ref_u /= np.linalg.norm(ref_u) + 1e-12
+    else:
+        # 如果没给，就退回到原来的全局 +X
+        ref_u = np.array([1.0, 0.0, 0.0], dtype=np.float64)
+
+    if np.dot(pc1, ref_u) < 0:
+        pc1 = -pc1
+
+    # 保持右手系，并让法向尽量朝向全局 +Z
+    pc3 = np.cross(pc1, pc2)
+    ref_normal = np.array([0.0, 0.0, 1.0], dtype=np.float64)
+    if np.dot(pc3, ref_normal) < 0:
+        pc2 = -pc2
+        pc3 = -pc3
 
     # ---- 2) 投影到 PCA 平面 ----
     u_prime = verts_centered @ pc1
@@ -389,9 +409,9 @@ def main():
     mesh.compute_vertex_normals()
     mesh.compute_triangle_normals()
 
-    # ---------- Step 0: 沿长轴切成多个 patch ----------
-    print(f"Splitting mesh into {args.n_patches} longitudinal patches...")
-    patch_meshes = split_mesh_longitudinal(mesh, n_patches=args.n_patches)
+    # ---------- Step 0: 沿固定 X 轴切成多个 patch ----------
+    print(f"Splitting mesh into {args.n_patches} longitudinal patches (fixed X axis)...")
+    patch_meshes, pc_long = split_mesh_longitudinal(mesh, n_patches=args.n_patches)
 
     # 用于汇总的 NURBS 点 & NURBS 网格
     all_nurbs_pts_dense = []
@@ -407,6 +427,7 @@ def main():
             patch_mesh,
             size_u=args.size_u,
             size_v=args.size_v,
+            long_axis=pc_long,      # 统一的“解剖长轴正方向”（此处为固定 X 轴）
         )
 
         print(

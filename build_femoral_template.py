@@ -4,7 +4,7 @@ r"""
 Template builder for ROI=2 (Femoral Cartilage) from OAI-ZIB-CM with
 NURBS (cubic tensor-product B-spline) template fitting.
 
-Pipeline (per your description):
+Pipeline:
 1. Randomly select 20–30 femoral cartilage masks from OAI-ZIB-CM/labelsTr.
 2. Extract ROI=2 binary masks.
 3. Marching Cubes → surface meshes; smooth (Taubin / Laplacian).
@@ -15,15 +15,15 @@ Pipeline (per your description):
    initialize T0(u,v) ≈ 2 mm, and save as a thickness map.
 
 Outputs:
-- average_mesh.ply              (Open3D mesh of average surface)
-- femoral_template_surf.npz     (control points, knots, degrees, etc.)
+- average_mesh.ply               (Open3D mesh of average surface)
+- femoral_template_surf.npz      (control points, knots, degrees, etc.)
 - femoral_template_thickness.npy (thickness map on (u,v) grid)
 
 python build_femoral_template.py ^
     --data_root C:\Users\chris\MICCAI2026\OAI-ZIB-CM ^
     --output_dir C:\Users\chris\MICCAI2026\Carti_Seg ^
-    --num_cases 25
-
+    --num_cases 25 ^
+    --visualize
 
 Author: (you + ChatGPT)
 """
@@ -32,6 +32,7 @@ import os
 import glob
 import argparse
 import random
+import copy
 
 import numpy as np
 import nibabel as nib
@@ -108,6 +109,11 @@ def parse_args():
         type=int,
         default=0,
         help="Random seed for case selection.",
+    )
+    parser.add_argument(
+        "--visualize",
+        action="store_true",
+        help="Visualize the average mesh and NURBS surface with Open3D.",
     )
     return parser.parse_args()
 
@@ -270,7 +276,6 @@ def fit_nurbs_surface_from_mesh(avg_mesh, size_u=60, size_v=40, degree_u=3, degr
     """
     Approximate a NURBS surface S_c(u,v) from the average mesh.
 
-    Changes vs previous version:
     - Normalize vertices into a unit-ish cube before fitting (better conditioning).
     - Fit NURBS in normalized space.
     - Rescale control points back to original coordinates.
@@ -349,8 +354,6 @@ def fit_nurbs_surface_from_mesh(avg_mesh, size_u=60, size_v=40, degree_u=3, degr
     return surf, uv_grid
 
 
-
-
 def save_nurbs_template(surf, uv_grid, thickness_init_mm, output_dir):
     """
     Save NURBS template parameters and initial thickness map.
@@ -390,6 +393,68 @@ def save_nurbs_template(surf, uv_grid, thickness_init_mm, output_dir):
     )
     np.save(
         os.path.join(output_dir, "femoral_template_thickness.npy"), thickness_map
+    )
+
+
+def nurbs_to_mesh(surf, res_u, res_v):
+    """
+    Sample the NURBS surface into an Open3D TriangleMesh.
+    res_u, res_v: sampling resolution in parameter directions.
+    This version avoids using surf.sample_size (which is scalar in some geomdl versions)
+    and instead directly calls evaluate_single on a (u,v) grid.
+    """
+    # Parameter domain: use [0, 1] since the surface returned by fitting.approximate_surface
+    # is parameterized on [0, 1] x [0, 1].
+    u_vals = np.linspace(0.0, 1.0, res_u)
+    v_vals = np.linspace(0.0, 1.0, res_v)
+
+    pts = []
+    for u in u_vals:
+        for v in v_vals:
+            # evaluate_single returns [x, y, z]
+            pt = surf.evaluate_single(u, v)
+            pts.append(pt)
+
+    vertices = np.asarray(pts, dtype=float)  # (res_u * res_v, 3)
+
+    # Build faces for a regular grid
+    triangles = []
+    for i in range(res_u - 1):
+        for j in range(res_v - 1):
+            idx0 = i * res_v + j
+            idx1 = idx0 + 1
+            idx2 = (i + 1) * res_v + j
+            idx3 = idx2 + 1
+            # two triangles per quad
+            triangles.append([idx0, idx2, idx1])
+            triangles.append([idx1, idx2, idx3])
+
+    mesh = o3d.geometry.TriangleMesh()
+    mesh.vertices = o3d.utility.Vector3dVector(vertices)
+    mesh.triangles = o3d.utility.Vector3iVector(np.asarray(triangles, dtype=np.int32))
+    mesh.compute_vertex_normals()
+    mesh.compute_triangle_normals()
+    return mesh
+
+
+def visualize_average_and_nurbs(avg_mesh, surf, uv_grid):
+    """
+    Visualize the average mesh (gray) and the fitted NURBS surface (red) in Open3D.
+    """
+    size_u = uv_grid.shape[0]
+    size_v = uv_grid.shape[1]
+
+    # Convert NURBS surface to a TriangleMesh
+    nurbs_mesh = nurbs_to_mesh(surf, res_u=size_u, res_v=size_v)
+
+    avg_mesh_vis = copy.deepcopy(avg_mesh)
+    avg_mesh_vis.paint_uniform_color([0.8, 0.8, 0.8])  # gray
+    nurbs_mesh.paint_uniform_color([1.0, 0.0, 0.0])     # red
+
+    print("Launching Open3D visualizer for average mesh (gray) and NURBS surface (red)...")
+    o3d.visualization.draw_geometries(
+        [avg_mesh_vis, nurbs_mesh],
+        window_name="Average Mesh + NURBS Surface",
     )
 
 
@@ -477,6 +542,9 @@ def main():
         thickness_init_mm=args.thickness_init,
         output_dir=args.output_dir,
     )
+
+    if args.visualize:
+        visualize_average_and_nurbs(avg_mesh, surf, uv_grid)
 
     print("Done. Template: central surface + thickness map ready for downstream use.")
 

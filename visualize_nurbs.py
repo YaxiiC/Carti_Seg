@@ -8,7 +8,7 @@ far outside the anatomical region.
 Usage example (Windows CMD):
 
   python visualize_nurbs.py ^
-    --central_mesh  C:\Users\chris\MICCAI2026\Carti_Seg\femoral_cartilage_template_central.ply ^
+    --central_mesh  C:\Users\chris\MICCAI2026\Carti_Seg\average_mesh.ply ^
     --template_npz  C:\Users\chris\MICCAI2026\Carti_Seg\femoral_template_surf.npz ^
     --bbox_margin   10.0 ^
     --n_u 150 --n_v 150 ^
