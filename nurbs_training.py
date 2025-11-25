@@ -86,8 +86,13 @@ class CartilageUNet(nn.Module):
         self.up1 = UpBlock(base_channels * 4, base_channels * 2)
         self.up0 = UpBlock(base_channels * 2, base_channels)
 
+        #ut_dim = n_ctrl * 3 + (n_ctrl if predict_weights else 0)
+        #elf.head = nn.Conv3d(base_channels, out_dim, kernel_size=1)
+ 
         out_dim = n_ctrl * 3 + (n_ctrl if predict_weights else 0)
-        self.head = nn.Conv3d(base_channels, out_dim, kernel_size=1)
+        self.pool = nn.AdaptiveAvgPool3d(1)   # 全局平均池化到 (B, C, 1,1,1)
+        self.head = nn.Linear(base_channels, out_dim)
+
         self.n_ctrl = n_ctrl
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
@@ -102,8 +107,12 @@ class CartilageUNet(nn.Module):
         x = self.up1(x, x1)
         x = self.up0(x, x0)
 
-        out = self.head(x)
-        out = out.mean(dim=[2, 3, 4])  # global average pooling over spatial dims
+        x = self.pool(x)            # (B, C, 1,1,1)
+        x = x.view(x.size(0), -1)   # (B, C)
+        out = self.head(x)   
+
+        #ut = self.head(x)
+        #ut = out.mean(dim=[2, 3, 4])  # global average pooling over spatial dims
         delta_p = out[:, : self.n_ctrl * 3].view(out.size(0), self.n_ctrl, 3)
         if self.predict_weights:
             delta_w = out[:, self.n_ctrl * 3 :].view(out.size(0), self.n_ctrl)
@@ -584,8 +593,12 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
 
 
 if __name__ == "__main__":
-    volume_paths = sorted(Path(r"home\yaxi\OAI-ZIB-CM-ICP\aligned\imagesTr").glob("*.nii.gz"))
-    seg_paths = sorted(Path(r"home\yaxi\OAI-ZIB-CM-ICP\aligned\labelsTr").glob("*.nii.gz"))
+    base = Path.home() / "OAI-ZIB-CM-ICP" / "aligned"
+    volume_dir = base / "imagesTr"
+    seg_dir    = base / "labelsTr"
+
+    volume_paths = sorted(volume_dir.glob("*.nii.gz"))
+    seg_paths    = sorted(seg_dir.glob("*.nii.gz"))
     pairs = list(zip(volume_paths, seg_paths))
 
     # 🔹 use only the first 5 image–label pairs
