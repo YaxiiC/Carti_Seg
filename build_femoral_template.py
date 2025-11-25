@@ -378,7 +378,7 @@ def save_nurbs_template(surf, uv_grid, thickness_init_mm, output_dir):
 
     # Save geometry
     np.savez(
-        os.path.join(output_dir, "femoral_template_surf.npz"),
+        os.path.join(output_dir, "femoral_template_surf.npz"),#this npz deprecated
         ctrlpts=ctrlpts_3d,
         knots_u=knots_u,
         knots_v=knots_v,
