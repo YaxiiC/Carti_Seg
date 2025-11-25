@@ -613,7 +613,7 @@ if __name__ == "__main__":
     pairs = list(zip(volume_paths, seg_paths))
 
     if args.max_samples is not None:
-        pairs = pairs[: args.max_samples]
+        pairs = pairs[: 100]
 
     # 默认使用由 fit_nurbs_from_central_template_2patch.py 生成的双 patch 模板
     default_templates = [
