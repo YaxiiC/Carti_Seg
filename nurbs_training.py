@@ -626,7 +626,7 @@ if __name__ == "__main__":
             pairs,
             default_templates,
             predict_weights=False,
-            epochs=2,
+            epochs=300,
         )
     else:
         print("No training data found. Populate the aligned/volumes and aligned/labels directories to run training.")
