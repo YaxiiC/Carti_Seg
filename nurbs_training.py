@@ -587,6 +587,34 @@ def evaluate_epoch(
     return metrics
 
 
+@torch.no_grad()
+def evaluate_epoch(
+    model: CartilageUNet,
+    template: NURBSTemplate | MultiPatchNURBSTemplate,
+    dataloader: torch.utils.data.DataLoader,
+    loss_fn: CartilageLoss,
+    device: torch.device,
+) -> Dict[str, float]:
+    model.eval()
+    metrics: Dict[str, float] = {}
+    L = template.laplacian_matrix().to(device)
+    for batch in dataloader:
+        volume = batch["volume"].to(device)
+        gt_points = batch["points"].to(device)
+        gt_normals = batch["normals"].to(device)
+
+        delta_p, delta_w = model(volume)
+        pred_points, pred_normals = template.evaluate(delta_p, delta_w)
+        losses = loss_fn(pred_points, pred_normals, gt_points, gt_normals, delta_p, L)
+
+        for k, v in losses.items():
+            metrics.setdefault(k, 0.0)
+            metrics[k] += float(v.detach().cpu())
+    for k in metrics:
+        metrics[k] /= len(dataloader)
+    return metrics
+
+
 def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_paths: Sequence[Path], predict_weights: bool = False, epochs: int = 10) -> None:
     """Minimal runnable training skeleton.
 
@@ -606,7 +634,11 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
         n_ctrl=template.n_ctrl,
         predict_weights=predict_weights,
         base_channels=16 # 原来是 32，先减半
-    ).to(device)
+    )
+    if torch.cuda.device_count() > 1:
+        print(f"Using DataParallel on {torch.cuda.device_count()} GPUs")
+        model = torch.nn.DataParallel(model)
+    model = model.to(device)
 
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     loss_fn = CartilageLoss()
