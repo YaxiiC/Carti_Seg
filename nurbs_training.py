@@ -559,6 +559,34 @@ def train_epoch(
     return metrics
 
 
+@torch.no_grad()
+def evaluate_epoch(
+    model: CartilageUNet,
+    template: NURBSTemplate | MultiPatchNURBSTemplate,
+    dataloader: torch.utils.data.DataLoader,
+    loss_fn: CartilageLoss,
+    device: torch.device,
+) -> Dict[str, float]:
+    model.eval()
+    metrics: Dict[str, float] = {}
+    L = template.laplacian_matrix().to(device)
+    for batch in dataloader:
+        volume = batch["volume"].to(device)
+        gt_points = batch["points"].to(device)
+        gt_normals = batch["normals"].to(device)
+
+        delta_p, delta_w = model(volume)
+        pred_points, pred_normals = template.evaluate(delta_p, delta_w)
+        losses = loss_fn(pred_points, pred_normals, gt_points, gt_normals, delta_p, L)
+
+        for k, v in losses.items():
+            metrics.setdefault(k, 0.0)
+            metrics[k] += float(v.detach().cpu())
+    for k in metrics:
+        metrics[k] /= len(dataloader)
+    return metrics
+
+
 def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_paths: Sequence[Path], predict_weights: bool = False, epochs: int = 10) -> None:
     """Minimal runnable training skeleton.
 
@@ -584,12 +612,46 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
     loss_fn = CartilageLoss()
 
     dataset = CartilageDataset(list(data_pairs))
-    dataloader = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=True, num_workers=0)
+    val_size = max(1, int(0.2 * len(dataset))) if len(dataset) > 1 else 0
+    train_size = len(dataset) - val_size
+    train_dataset, val_dataset = (
+        torch.utils.data.random_split(dataset, [train_size, val_size]) if val_size > 0 else (dataset, None)
+    )
+
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=0)
+    val_loader = (
+        torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0)
+        if val_dataset is not None
+        else None
+    )
+
+    def _format_metrics(metrics: Dict[str, float]) -> str:
+        return " | ".join(f"{k}: {v:.4f}" for k, v in sorted(metrics.items())) if metrics else "(no metrics)"
+
+    best_val = float("inf")
+    checkpoint_path = Path("best_model.pth")
 
     for epoch in range(epochs):
-        metrics = train_epoch(model, template, dataloader, optimizer, loss_fn, device)
-        chamfer_val = metrics.get("chamfer", 0.0)
-        print(f"Epoch {epoch:03d} | Chamfer: {chamfer_val:.4f} | Metrics: {metrics}")
+        train_metrics = train_epoch(model, template, train_loader, optimizer, loss_fn, device)
+        print(f"Epoch {epoch:03d} | Train -> {_format_metrics(train_metrics)}")
+
+        if val_loader is not None:
+            val_metrics = evaluate_epoch(model, template, val_loader, loss_fn, device)
+            val_chamfer = val_metrics.get("chamfer", float("inf"))
+            print(f"Epoch {epoch:03d} | Val   -> {_format_metrics(val_metrics)}")
+
+            if val_chamfer < best_val:
+                best_val = val_chamfer
+                torch.save(
+                    {
+                        "epoch": epoch,
+                        "model_state": model.state_dict(),
+                        "optimizer_state": optimizer.state_dict(),
+                        "val_metrics": val_metrics,
+                    },
+                    checkpoint_path,
+                )
+                print(f"Saved new best checkpoint to {checkpoint_path} (val chamfer={val_chamfer:.4f})")
 
 
 if __name__ == "__main__":
