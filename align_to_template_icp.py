@@ -29,6 +29,14 @@ python align_to_template_icp.py ^
   --ref_mesh C:\Users\chris\MICCAI2026\Carti_Seg\femoral_cartilage_template_central.ply ^
   --keep_largest_cc
 
+  python align_to_template_icp.py ^
+  --data_root C:\Users\chris\MICCAI2026\OAI-ZIB-CM ^
+  --out_root C:\Users\chris\MICCAI2026\Carti_Seg ^
+  --split Ts ^
+  --roi_id 2 ^
+  --ref_mesh C:\Users\chris\MICCAI2026\Carti_Seg\average_mesh.ply ^
+  --keep_largest_cc
+
 依赖：
   pip install numpy nibabel scikit-image open3d scipy tqdm
 """
