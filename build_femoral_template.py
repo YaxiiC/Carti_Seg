@@ -20,6 +20,7 @@ Outputs:
 - <roi>_template_thickness.npy         (thickness map on (u,v) grid)
 
 python build_femoral_template.py ^
+    --roi 5 ^
     --data_root C:\Users\chris\MICCAI2026\OAI-ZIB-CM ^
     --output_dir C:\Users\chris\MICCAI2026\Carti_Seg ^
     --num_cases 25 ^
@@ -453,11 +454,11 @@ def nurbs_to_mesh(surf, res_u, res_v):
     pts = []
     for u in u_vals:
         for v in v_vals:
-            # evaluate_single returns [x, y, z]
-            pt = surf.evaluate_single(u, v)
+            # evaluate_single takes a single (u, v) param pair
+            pt = surf.evaluate_single((u, v))  # or [u, v]
             pts.append(pt)
 
-    vertices = np.asarray(pts, dtype=float)  # (res_u * res_v, 3)
+    vertices = np.asarray(pts, dtype=float)
 
     # Build faces for a regular grid
     triangles = []
