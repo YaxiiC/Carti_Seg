@@ -650,9 +650,9 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
         torch.utils.data.random_split(dataset, [train_size, val_size]) if val_size > 0 else (dataset, None)
     )
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=2, shuffle=True, num_workers=0)
+    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=1, shuffle=True, num_workers=0)
     val_loader = (
-        torch.utils.data.DataLoader(val_dataset, batch_size=2, shuffle=False, num_workers=0)
+        torch.utils.data.DataLoader(val_dataset, batch_size=1, shuffle=False, num_workers=0)
         if val_dataset is not None
         else None
     )
