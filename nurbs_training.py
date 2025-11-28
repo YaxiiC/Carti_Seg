@@ -719,8 +719,8 @@ if __name__ == "__main__":
         example_training_loop(
             pairs,
             default_templates,
-            predict_weights=False,
-            epochs=300,
+            predict_weights=True,
+            epochs=400,
         )
     else:
         print("No training data found. Populate the aligned/volumes and aligned/labels directories to run training.")
