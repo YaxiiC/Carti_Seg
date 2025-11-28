@@ -1,8 +1,8 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 r"""
-Template builder for ROI=2 (Femoral Cartilage) from OAI-ZIB-CM with
-NURBS (cubic tensor-product B-spline) template fitting.
+Template builder for configurable ROIs (bones or cartilage) from OAI-ZIB-CM
+with NURBS (cubic tensor-product B-spline) template fitting.
 
 Pipeline:
 1. Randomly select 20–30 femoral cartilage masks from OAI-ZIB-CM/labelsTr.
@@ -15,9 +15,9 @@ Pipeline:
    initialize T0(u,v) ≈ 2 mm, and save as a thickness map.
 
 Outputs:
-- average_mesh.ply               (Open3D mesh of average surface)
-- femoral_template_surf.npz      (control points, knots, degrees, etc.)
-- femoral_template_thickness.npy (thickness map on (u,v) grid)
+- <roi>_average_mesh.ply               (Open3D mesh of average surface)
+- <roi>_template_surf.npz              (control points, knots, degrees, etc.)
+- <roi>_template_thickness.npy         (thickness map on (u,v) grid)
 
 python build_femoral_template.py ^
     --data_root C:\Users\chris\MICCAI2026\OAI-ZIB-CM ^
@@ -42,13 +42,55 @@ import open3d as o3d
 # For NURBS / B-spline surface fitting
 from geomdl import fitting
 
-
+ROI_FEMUR = 1
 ROI_FEMORAL_CARTILAGE = 2
+ROI_TIBIA = 3
+ROI_MEDIAL_TIBIAL_CARTILAGE = 4
+ROI_LATERAL_TIBIAL_CARTILAGE = 5
+
+
+ROI_ID_TO_NAME = {
+    ROI_FEMUR: "femur",
+    ROI_FEMORAL_CARTILAGE: "femoral_cartilage",
+    ROI_TIBIA: "tibia",
+    ROI_MEDIAL_TIBIAL_CARTILAGE: "medial_tibial_cartilage",
+    ROI_LATERAL_TIBIAL_CARTILAGE: "lateral_tibial_cartilage",
+}
+
+
+def _parse_roi(roi_value: str):
+    """Parse ROI from CLI (accepts id or anatomical name)."""
+
+    # try integer first
+    if roi_value.isdigit():
+        roi_id = int(roi_value)
+        if roi_id not in ROI_ID_TO_NAME:
+            raise ValueError(f"Unsupported ROI id: {roi_id}")
+        return roi_id, ROI_ID_TO_NAME[roi_id]
+
+    roi_key = roi_value.strip().lower()
+    for k, v in ROI_ID_TO_NAME.items():
+        if roi_key == v:
+            return k, v
+
+    raise ValueError(
+        f"Unsupported ROI '{roi_value}'. Use one of: "
+        f"{', '.join(ROI_ID_TO_NAME.values())} or ids {list(ROI_ID_TO_NAME.keys())}"
+    )
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Build a femoral cartilage NURBS template (ROI=2) from OAI-ZIB-CM."
+        description="Build a cartilage/bone NURBS template (configurable ROI) from OAI-ZIB-CM."
+    )
+    parser.add_argument(
+        "--roi",
+        type=str,
+        default=str(ROI_FEMORAL_CARTILAGE),
+        help=(
+            "ROI id or anatomical name to extract. Supported: "
+            f"{', '.join(f'{k}:{v}' for k, v in ROI_ID_TO_NAME.items())}."
+        ),
     )
     parser.add_argument(
         "--data_root",
@@ -65,8 +107,8 @@ def parse_args():
     parser.add_argument(
         "--output_dir",
         type=str,
-        default="./femoral_template",
-        help="Directory to store the template outputs.",
+        default=None,
+        help="Directory to store the template outputs (defaults to ./<roi_name>_template).",
     )
     parser.add_argument(
         "--min_voxels",
@@ -354,7 +396,7 @@ def fit_nurbs_surface_from_mesh(avg_mesh, size_u=60, size_v=40, degree_u=3, degr
     return surf, uv_grid
 
 
-def save_nurbs_template(surf, uv_grid, thickness_init_mm, output_dir):
+def save_nurbs_template(surf, uv_grid, thickness_init_mm, output_dir, roi_name):
     """
     Save NURBS template parameters and initial thickness map.
 
@@ -378,7 +420,7 @@ def save_nurbs_template(surf, uv_grid, thickness_init_mm, output_dir):
 
     # Save geometry
     np.savez(
-        os.path.join(output_dir, "femoral_template_surf.npz"),#this npz deprecated
+        os.path.join(output_dir, f"{roi_name}_template_surf.npz"),
         ctrlpts=ctrlpts_3d,
         knots_u=knots_u,
         knots_v=knots_v,
@@ -392,7 +434,7 @@ def save_nurbs_template(surf, uv_grid, thickness_init_mm, output_dir):
         (uv_grid.shape[0], uv_grid.shape[1]), float(thickness_init_mm), dtype=np.float32
     )
     np.save(
-        os.path.join(output_dir, "femoral_template_thickness.npy"), thickness_map
+        os.path.join(output_dir, f"{roi_name}_template_thickness.npy"), thickness_map
     )
 
 
@@ -460,6 +502,8 @@ def visualize_average_and_nurbs(avg_mesh, surf, uv_grid):
 
 def main():
     args = parse_args()
+    roi_id, roi_name = _parse_roi(args.roi)
+    output_dir = args.output_dir or os.path.join(".", f"{roi_name}_template")
     random.seed(args.seed)
     np.random.seed(args.seed)
 
@@ -471,7 +515,9 @@ def main():
     if len(label_files) == 0:
         raise RuntimeError(f"No label files found in {labels_tr_dir}")
 
-    print(f"Found {len(label_files)} label files.")
+    print(
+        f"Found {len(label_files)} label files. Building template for ROI={roi_id} ({roi_name})."
+    )
     num_cases = min(args.num_cases, len(label_files))
     selected_files = random.sample(label_files, num_cases)
     print(f"Randomly selected {len(selected_files)} cases for template building.")
@@ -482,11 +528,11 @@ def main():
     for lf in selected_files:
         print(f"Loading label: {os.path.basename(lf)}")
         lbl_vol, spacing = load_nifti(lf)
-        roi_mask = extract_roi_mask(lbl_vol, ROI_FEMORAL_CARTILAGE)
+        roi_mask = extract_roi_mask(lbl_vol, roi_id)
         voxel_count = roi_mask.sum()
         if voxel_count < args.min_voxels:
             print(
-                f"  -> Skipped (ROI=2 too small: {voxel_count} voxels < {args.min_voxels})"
+                f"  -> Skipped (ROI={roi_id} too small: {voxel_count} voxels < {args.min_voxels})"
             )
             continue
 
@@ -517,8 +563,8 @@ def main():
     print("Computing average mesh on reference topology...")
     avg_mesh = compute_average_mesh(ref_mesh, aligned_meshes)
 
-    os.makedirs(args.output_dir, exist_ok=True)
-    avg_mesh_path = os.path.join(args.output_dir, "average_mesh.ply")
+    os.makedirs(output_dir, exist_ok=True)
+    avg_mesh_path = os.path.join(output_dir, f"{roi_name}_average_mesh.ply")
     o3d.io.write_triangle_mesh(avg_mesh_path, avg_mesh)
     print(f"Average mesh saved to: {avg_mesh_path}")
 
@@ -540,7 +586,8 @@ def main():
         surf,
         uv_grid,
         thickness_init_mm=args.thickness_init,
-        output_dir=args.output_dir,
+        output_dir=output_dir,
+        roi_name=roi_name,
     )
 
     if args.visualize:
