@@ -23,7 +23,7 @@ python build_femoral_template.py ^
     --roi 5 ^
     --data_root C:\Users\chris\MICCAI2026\OAI-ZIB-CM ^
     --output_dir C:\Users\chris\MICCAI2026\Carti_Seg ^
-    --num_cases 25 ^
+    --num_cases 30 ^
     --visualize
 
 Author: (you + ChatGPT)

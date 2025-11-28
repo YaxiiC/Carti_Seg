@@ -1,0 +1,9 @@
+pred2gt_mean: 0.566562
+pred2gt_median: 0.512830
+pred2gt_95: 1.086076
+pred2gt_max: 4.684607
+gt2pred_mean: 0.838598
+gt2pred_median: 0.611425
+gt2pred_95: 2.355274
+gt2pred_max: 6.439953
+chamfer: 1.405161
