@@ -661,7 +661,7 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
         return " | ".join(f"{k}: {v:.4f}" for k, v in sorted(metrics.items())) if metrics else "(no metrics)"
 
     best_val = float("inf")
-    checkpoint_path = Path("best_model.pth")
+    checkpoint_path = Path("best_model_new.pth")
 
     for epoch in range(epochs):
         train_metrics = train_epoch(model, template, train_loader, optimizer, loss_fn, device)
