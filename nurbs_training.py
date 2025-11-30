@@ -1,4 +1,4 @@
-r"""raining utilities for femoral cartilage NURBS prediction with PyTorch.
+r"""Training utilities for configurable cartilage / bone NURBS prediction with PyTorch.
 
 This module contains:
 - CartilageUNet: a lightweight 3D U-Net producing control-point displacements.
@@ -25,6 +25,48 @@ from skimage import measure
 
 # 固定的长轴方向（与 fit_nurbs_from_central_template_2patch.py 保持一致），用于两 patch 模板的排列
 PC_LONG = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+
+ROI_FEMUR = 1
+ROI_FEMORAL_CARTILAGE = 2
+ROI_TIBIA = 3
+ROI_MEDIAL_TIBIAL_CARTILAGE = 4
+ROI_LATERAL_TIBIAL_CARTILAGE = 5
+
+ROI_ID_TO_NAME = {
+    ROI_FEMUR: "femur",
+    ROI_FEMORAL_CARTILAGE: "femoral_cartilage",
+    ROI_TIBIA: "tibia",
+    ROI_MEDIAL_TIBIAL_CARTILAGE: "medial_tibial_cartilage",
+    ROI_LATERAL_TIBIAL_CARTILAGE: "lateral_tibial_cartilage",
+}
+
+
+def parse_roi(roi_value: str) -> Tuple[int, str]:
+    """Parse ROI from CLI (accepts id or anatomical name)."""
+
+    if roi_value.isdigit():
+        roi_id = int(roi_value)
+        if roi_id not in ROI_ID_TO_NAME:
+            raise ValueError(f"Unsupported ROI id: {roi_id}")
+        return roi_id, ROI_ID_TO_NAME[roi_id]
+
+    roi_key = roi_value.strip().lower()
+    for k, v in ROI_ID_TO_NAME.items():
+        if roi_key == v:
+            return k, v
+
+    raise ValueError(
+        f"Unsupported ROI '{roi_value}'. Use one of: "
+        f"{', '.join(ROI_ID_TO_NAME.values())} or ids {list(ROI_ID_TO_NAME.keys())}"
+    )
+
+
+def default_template_paths(roi_name: str, n_patches: int = 2) -> List[Path]:
+    """Return default template npz paths for the ROI, assuming patch naming."""
+
+    if n_patches == 1:
+        return [Path(f"{roi_name}_template_surf.npz")]
+    return [Path(f"{roi_name}_template_surf_patch{i}.npz") for i in range(n_patches)]
 
 
 # -----------------------------
@@ -587,35 +629,16 @@ def evaluate_epoch(
     return metrics
 
 
-@torch.no_grad()
-def evaluate_epoch(
-    model: CartilageUNet,
-    template: NURBSTemplate | MultiPatchNURBSTemplate,
-    dataloader: torch.utils.data.DataLoader,
-    loss_fn: CartilageLoss,
-    device: torch.device,
-) -> Dict[str, float]:
-    model.eval()
-    metrics: Dict[str, float] = {}
-    L = template.laplacian_matrix().to(device)
-    for batch in dataloader:
-        volume = batch["volume"].to(device)
-        gt_points = batch["points"].to(device)
-        gt_normals = batch["normals"].to(device)
-
-        delta_p, delta_w = model(volume)
-        pred_points, pred_normals = template.evaluate(delta_p, delta_w)
-        losses = loss_fn(pred_points, pred_normals, gt_points, gt_normals, delta_p, L)
-
-        for k, v in losses.items():
-            metrics.setdefault(k, 0.0)
-            metrics[k] += float(v.detach().cpu())
-    for k in metrics:
-        metrics[k] /= len(dataloader)
-    return metrics
-
-
-def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_paths: Sequence[Path], predict_weights: bool = False, epochs: int = 10) -> None:
+def example_training_loop(
+    data_pairs: Iterable[Tuple[Path, Path]],
+    template_paths: Sequence[Path],
+    predict_weights: bool = False,
+    epochs: int = 10,
+    roi_label: int = ROI_FEMORAL_CARTILAGE,
+    num_samples: int = 4096,
+    margin: int = 8,
+    checkpoint_path: Path = Path("best_model.pth"),
+) -> None:
     """Minimal runnable training skeleton.
 
     Args:
@@ -643,7 +666,7 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-4)
     loss_fn = CartilageLoss()
 
-    dataset = CartilageDataset(list(data_pairs))
+    dataset = CartilageDataset(list(data_pairs), roi_label=roi_label, num_samples=num_samples, margin=margin)
     val_size = max(1, int(0.2 * len(dataset))) if len(dataset) > 1 else 0
     train_size = len(dataset) - val_size
     train_dataset, val_dataset = (
@@ -661,7 +684,6 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
         return " | ".join(f"{k}: {v:.4f}" for k, v in sorted(metrics.items())) if metrics else "(no metrics)"
 
     best_val = float("inf")
-    checkpoint_path = Path("best_model_new.pth")
 
     for epoch in range(epochs):
         train_metrics = train_epoch(model, template, train_loader, optimizer, loss_fn, device)
@@ -689,39 +711,100 @@ def example_training_loop(data_pairs: Iterable[Tuple[Path, Path]], template_path
 if __name__ == "__main__":
     import argparse
 
-    parser = argparse.ArgumentParser(description="Train cartilage NURBS model")
+    parser = argparse.ArgumentParser(description="Train cartilage/bone NURBS model")
+    parser.add_argument(
+        "--roi",
+        type=str,
+        default=str(ROI_FEMORAL_CARTILAGE),
+        help=(
+            "ROI id or anatomical name. Supported: "
+            f"{', '.join(f'{k}:{v}' for k, v in ROI_ID_TO_NAME.items())}."
+        ),
+    )
+    parser.add_argument(
+        "--data-root",
+        type=Path,
+        default=Path.home() / "OAI-ZIB-CM-ICP" / "aligned",
+        help="Root folder containing imagesTr/ and labelsTr/ splits.",
+    )
+    parser.add_argument(
+        "--templates",
+        type=Path,
+        nargs="+",
+        default=None,
+        help="Optional explicit template npz paths (otherwise derived from ROI name).",
+    )
+    parser.add_argument(
+        "--n-patches",
+        type=int,
+        default=2,
+        help="Number of longitudinal patches when using default template paths.",
+    )
+    parser.add_argument(
+        "--predict-weights",
+        action="store_true",
+        help="Train with control-point weight offsets as well as positions.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=400,
+        help="Number of training epochs.",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=4096,
+        help="Surface samples per case for supervision.",
+    )
+    parser.add_argument(
+        "--margin",
+        type=int,
+        default=8,
+        help="Padding around ROI bounding box when cropping volumes.",
+    )
     parser.add_argument(
         "--max-samples",
         type=int,
         default=None,
-        help="Optional limit on number of image–label pairs to use (default: all)",
+        help="Optional limit on number of image–label pairs to use (default: all).",
+    )
+    parser.add_argument(
+        "--checkpoint-out",
+        type=Path,
+        default=None,
+        help="Where to write the best checkpoint (defaults to <roi_name>_best_model.pth).",
     )
     args = parser.parse_args()
 
-    base = Path.home() / "OAI-ZIB-CM-ICP" / "aligned"
-    volume_dir = base / "imagesTr"
-    seg_dir    = base / "labelsTr"
+    roi_id, roi_name = parse_roi(args.roi)
+
+    volume_dir = args.data_root / "imagesTr"
+    seg_dir = args.data_root / "labelsTr"
 
     volume_paths = sorted(volume_dir.glob("*.nii.gz"))
-    seg_paths    = sorted(seg_dir.glob("*.nii.gz"))
+    seg_paths = sorted(seg_dir.glob("*.nii.gz"))
     pairs = list(zip(volume_paths, seg_paths))
 
     if args.max_samples is not None:
-        pairs = pairs[: 100]
+        pairs = pairs[: args.max_samples]
 
-    # 默认使用由 fit_nurbs_from_central_template_2patch.py 生成的双 patch 模板
-    default_templates = [
-        Path("femoral_template_surf_patch0.npz"),
-        Path("femoral_template_surf_patch1.npz"),
-    ]
+    template_paths = args.templates or default_template_paths(roi_name, n_patches=args.n_patches)
+    checkpoint_out = args.checkpoint_out or Path(f"{roi_name}_best_model.pth")
 
     if pairs:
         example_training_loop(
             pairs,
-            default_templates,
-            predict_weights=True,
-            epochs=400,
+            template_paths,
+            predict_weights=args.predict_weights,
+            epochs=args.epochs,
+            roi_label=roi_id,
+            num_samples=args.num_samples,
+            margin=args.margin,
+            checkpoint_path=checkpoint_out,
         )
     else:
-        print("No training data found. Populate the aligned/volumes and aligned/labels directories to run training.")
+        print(
+            "No training data found. Populate the aligned/imagesTr and aligned/labelsTr directories to run training."
+        )
 

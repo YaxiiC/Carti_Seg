@@ -31,6 +31,8 @@ from nurbs_training import (
     MultiPatchNURBSTemplate,
     NURBSTemplate,
     crop_to_mask_bbox,
+    default_template_paths,
+    parse_roi,
 )
 
 
@@ -183,17 +185,31 @@ def evaluate_model(
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Evaluate NURBS cartilage model on a held-out test set.")
-    parser.add_argument("--checkpoint", type=Path, default=Path("best_model.pth"), help="Path to the trained checkpoint.")
+    parser = argparse.ArgumentParser(description="Evaluate NURBS cartilage/bone model on a held-out test set.")
+    parser.add_argument(
+        "--roi",
+        type=str,
+        default="2",
+        help="ROI id or anatomical name (must match the trained model).",
+    )
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="Path to the trained checkpoint (defaults to <roi_name>_best_model.pth).",
+    )
     parser.add_argument(
         "--templates",
         type=Path,
         nargs="+",
-        default=[
-            Path("femoral_template_surf_patch0.npz"),
-            Path("femoral_template_surf_patch1.npz"),
-        ],
-        help="NURBS template npz file(s).",
+        default=None,
+        help="NURBS template npz file(s); derived from ROI name if omitted.",
+    )
+    parser.add_argument(
+        "--n-patches",
+        type=int,
+        default=2,
+        help="Number of longitudinal patches when using default template paths.",
     )
     parser.add_argument(
         "--data-root",
@@ -201,10 +217,14 @@ if __name__ == "__main__":
         default=Path.home() / "OAI-ZIB-CM-ICP" / "aligned",
         help="Root folder containing imagesTs/ and labelsTs/ splits.",
     )
-    parser.add_argument("--roi-label", type=int, default=2, help="Segmentation label to evaluate.")
+    parser.add_argument("--roi-label", type=int, default=None, help="Segmentation label to evaluate.")
     parser.add_argument("--margin", type=int, default=8, help="Padding around the ROI bounding box.")
-    parser.add_argument("--predict-weights", action="store_true", help="Set if the checkpoint was trained with weight offsets.")
+    parser.add_argument(
+        "--predict-weights", action="store_true", help="Set if the checkpoint was trained with weight offsets."
+    )
     args = parser.parse_args()
+
+    roi_id, roi_name = parse_roi(args.roi)
 
     images_dir = args.data_root / "imagesTs"
     labels_dir = args.data_root / "labelsTs"
@@ -212,11 +232,15 @@ if __name__ == "__main__":
     seg_paths = sorted(labels_dir.glob("*.nii.gz"))
     pairs = list(zip(volume_paths, seg_paths))
 
+    template_paths = args.templates or default_template_paths(roi_name, n_patches=args.n_patches)
+    checkpoint_path = args.checkpoint or Path(f"{roi_name}_best_model.pth")
+    roi_label = args.roi_label if args.roi_label is not None else roi_id
+
     evaluate_model(
-        checkpoint_path=args.checkpoint,
-        template_paths=args.templates,
+        checkpoint_path=checkpoint_path,
+        template_paths=template_paths,
         test_pairs=pairs,
-        roi_label=args.roi_label,
+        roi_label=roi_label,
         margin=args.margin,
         predict_weights=args.predict_weights,
     )

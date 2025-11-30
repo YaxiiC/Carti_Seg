@@ -10,7 +10,8 @@ Visualize central template mesh and multi-patch NURBS surfaces.
 Usage example (Windows CMD):
 
   python visualize_nurbs_multipatch.py ^
-    --central_mesh  C:\Users\chris\MICCAI2026\Carti_Seg\average_mesh.ply ^
+    --roi 2 ^
+    --central_mesh  C:\Users\chris\MICCAI2026\Carti_Seg\femoral_cartilage_average_mesh.ply ^
     --out_dir       C:\Users\chris\MICCAI2026\Carti_Seg ^
     --n_patches     2 ^
     --bbox_margin   10.0 ^
@@ -18,9 +19,9 @@ Usage example (Windows CMD):
     --show_ctrlmesh
 
 要求：fit 脚本已经在 out_dir 下生成
-  femoral_template_surf_patch0.npz
-  femoral_template_surf_patch1.npz
-  (如果 n_patches=3 则还有 femoral_template_surf_patch2.npz)
+  <roi_name>_template_surf_patch0.npz
+  <roi_name>_template_surf_patch1.npz
+  (如果 n_patches=3 则还有 <roi_name>_template_surf_patch2.npz)
 """
 
 import argparse
@@ -29,6 +30,38 @@ from pathlib import Path
 import numpy as np
 import open3d as o3d
 from geomdl import BSpline
+
+ROI_FEMUR = 1
+ROI_FEMORAL_CARTILAGE = 2
+ROI_TIBIA = 3
+ROI_MEDIAL_TIBIAL_CARTILAGE = 4
+ROI_LATERAL_TIBIAL_CARTILAGE = 5
+
+ROI_ID_TO_NAME = {
+    ROI_FEMUR: "femur",
+    ROI_FEMORAL_CARTILAGE: "femoral_cartilage",
+    ROI_TIBIA: "tibia",
+    ROI_MEDIAL_TIBIAL_CARTILAGE: "medial_tibial_cartilage",
+    ROI_LATERAL_TIBIAL_CARTILAGE: "lateral_tibial_cartilage",
+}
+
+
+def _parse_roi(roi_value: str):
+    if roi_value.isdigit():
+        roi_id = int(roi_value)
+        if roi_id not in ROI_ID_TO_NAME:
+            raise ValueError(f"Unsupported ROI id: {roi_id}")
+        return roi_id, ROI_ID_TO_NAME[roi_id]
+
+    roi_key = roi_value.strip().lower()
+    for k, v in ROI_ID_TO_NAME.items():
+        if roi_key == v:
+            return k, v
+
+    raise ValueError(
+        f"Unsupported ROI '{roi_value}'. Use one of: "
+        f"{', '.join(ROI_ID_TO_NAME.values())} or ids {list(ROI_ID_TO_NAME.keys())}"
+    )
 
 
 # -------------------------------------------------------------------------
@@ -39,16 +72,31 @@ def parse_args():
         description="Visualize central mesh and multi-patch NURBS surfaces."
     )
     p.add_argument(
+        "--roi",
+        type=str,
+        default=str(ROI_FEMORAL_CARTILAGE),
+        help=(
+            "ROI id or anatomical name. Supported: "
+            f"{', '.join(f'{k}:{v}' for k, v in ROI_ID_TO_NAME.items())}."
+        ),
+    )
+    p.add_argument(
         "--central_mesh",
         type=str,
-        required=True,
-        help="Path to central template .ply (e.g., femoral_cartilage_template_central.ply)",
+        default=None,
+        help=(
+            "Path to ROI central template .ply. If omitted, defaults to "
+            "<out_dir>/<roi_name>_average_mesh.ply."
+        ),
     )
     p.add_argument(
         "--out_dir",
         type=str,
-        required=True,
-        help="Directory containing femoral_template_surf_patch*.npz and NURBS meshes.",
+        default=None,
+        help=(
+            "Directory containing <roi_name>_template_surf_patch*.npz and NURBS meshes. "
+            "Defaults to ./<roi_name>_template."
+        ),
     )
     p.add_argument(
         "--n_patches",
@@ -163,11 +211,17 @@ def build_ctrlmesh_lines(ctrlpts_grid: np.ndarray, color: np.ndarray) -> o3d.geo
 # -------------------------------------------------------------------------
 def main():
     args = parse_args()
-    central_path = Path(args.central_mesh)
-    out_dir = Path(args.out_dir)
+    roi_id, roi_name = _parse_roi(args.roi)
+    out_dir = (
+        Path(args.out_dir)
+        if args.out_dir is not None
+        else Path(f"{roi_name}_template")
+    )
+    default_central = out_dir / f"{roi_name}_average_mesh.ply"
+    central_path = Path(args.central_mesh) if args.central_mesh else default_central
 
     # ---- 1. load central mesh ----
-    print(f"Loading central mesh: {central_path}")
+    print(f"ROI {roi_id} ({roi_name}). Loading central mesh: {central_path}")
     central = o3d.io.read_triangle_mesh(str(central_path))
     if not central.has_vertices():
         raise RuntimeError(f"Failed to load central mesh or mesh is empty: {central_path}")
@@ -190,7 +244,7 @@ def main():
 
     # ---- 2. 对每个 patch 读取参数并可视化 ----
     for pid in range(args.n_patches):
-        npz_path = out_dir / f"femoral_template_surf_patch{pid}.npz"
+        npz_path = out_dir / f"{roi_name}_template_surf_patch{pid}.npz"
         print(f"\nLoading NURBS patch {pid} from: {npz_path}")
         if not npz_path.exists():
             raise RuntimeError(f"Patch npz not found: {npz_path}")

@@ -7,8 +7,8 @@ and verify the fitting accuracy in 3D via Chamfer distance.
 
 结构性改进：多 patch NURBS 模板
 ----------------------------------------------------
-1. 用固定世界坐标 X 轴作为“长轴方向”；
-2. 沿 X 轴方向，用投影值把三角面片划分为 2 或 3 段（patch）：
+1. 用固定世界坐标 Y 轴作为“长轴方向”（与现有实现一致）；
+2. 沿 Y 轴方向，用投影值把三角面片划分为 2 或 3 段（patch）：
    - n_patches=2: 左半 / 右半
    - n_patches=3: 左 / 中 / 右
 3. 对每个 patch 的子网格：
@@ -19,15 +19,16 @@ and verify the fitting accuracy in 3D via Chamfer distance.
    - 用这些控制点构造一个三次 B-spline 曲面（不做额外拟合）。
 4. 在每个 patch 的 NURBS 曲面上采样点，把所有 patch 的采样点并在一起，
    与原始 central template 表面做 Chamfer 距离评估整体拟合质量。
-5. 输出：
-   - femoral_template_surf_patch0.npz / patch1.npz (/ patch2.npz)
-   - femoral_template_nurbs_mesh_multi.ply   （所有 patch 的 NURBS 网格合在一起）
-   - femoral_template_chamfer_stats.txt      （Chamfer 统计）
+  5. 输出：
+     - <roi_name>_template_surf_patch0.npz / patch1.npz (/ patch2.npz)
+     - <roi_name>_template_nurbs_mesh_multi.ply   （所有 patch 的 NURBS 网格合在一起）
+     - <roi_name>_template_chamfer_stats.txt      （Chamfer 统计）
 
 Example:
 
 python fit_nurbs_from_central_template_2patch.py ^
-  --central_mesh C:\Users\chris\MICCAI2026\Carti_Seg\average_mesh.ply ^
+  --roi 2 ^
+  --central_mesh C:\Users\chris\MICCAI2026\Carti_Seg\femoral_cartilage_average_mesh.ply ^
   --out_dir      C:\Users\chris\MICCAI2026\Carti_Seg ^
   --size_u 30 --size_v 30 ^
   --n_patches 2
@@ -41,6 +42,40 @@ import open3d as o3d
 from geomdl import BSpline, utilities
 from scipy.spatial import cKDTree
 
+ROI_FEMUR = 1
+ROI_FEMORAL_CARTILAGE = 2
+ROI_TIBIA = 3
+ROI_MEDIAL_TIBIAL_CARTILAGE = 4
+ROI_LATERAL_TIBIAL_CARTILAGE = 5
+
+ROI_ID_TO_NAME = {
+    ROI_FEMUR: "femur",
+    ROI_FEMORAL_CARTILAGE: "femoral_cartilage",
+    ROI_TIBIA: "tibia",
+    ROI_MEDIAL_TIBIAL_CARTILAGE: "medial_tibial_cartilage",
+    ROI_LATERAL_TIBIAL_CARTILAGE: "lateral_tibial_cartilage",
+}
+
+
+def _parse_roi(roi_value: str):
+    """Parse ROI from CLI (accepts id or anatomical name)."""
+
+    if roi_value.isdigit():
+        roi_id = int(roi_value)
+        if roi_id not in ROI_ID_TO_NAME:
+            raise ValueError(f"Unsupported ROI id: {roi_id}")
+        return roi_id, ROI_ID_TO_NAME[roi_id]
+
+    roi_key = roi_value.strip().lower()
+    for k, v in ROI_ID_TO_NAME.items():
+        if roi_key == v:
+            return k, v
+
+    raise ValueError(
+        f"Unsupported ROI '{roi_value}'. Use one of: "
+        f"{', '.join(ROI_ID_TO_NAME.values())} or ids {list(ROI_ID_TO_NAME.keys())}"
+    )
+
 
 # -------------------------------------------------------------------------
 # CLI
@@ -50,16 +85,31 @@ def parse_args():
         description="Fit multi-patch NURBS surfaces from central cartilage template (quad control meshes, no LSCM)."
     )
     p.add_argument(
+        "--roi",
+        type=str,
+        default=str(ROI_FEMORAL_CARTILAGE),
+        help=(
+            "ROI id or anatomical name. Supported: "
+            f"{', '.join(f'{k}:{v}' for k, v in ROI_ID_TO_NAME.items())}."
+        ),
+    )
+    p.add_argument(
         "--central_mesh",
         type=str,
-        required=True,
-        help="Path to central template .ply (e.g., femoral_cartilage_template_central.ply)",
+        default=None,
+        help=(
+            "Path to ROI central template .ply. If omitted, defaults to "
+            "<out_dir>/<roi_name>_average_mesh.ply."
+        ),
     )
     p.add_argument(
         "--out_dir",
         type=str,
-        required=True,
-        help="Output directory to save NURBS template and verification meshes.",
+        default=None,
+        help=(
+            "Output directory to save NURBS template and verification meshes. "
+            "Defaults to ./<roi_name>_template."
+        ),
     )
     p.add_argument(
         "--n_patches",
@@ -114,14 +164,14 @@ def parse_args():
 
 
 # -------------------------------------------------------------------------
-# 工具：mesh 划分为多个 patch（使用固定 X 轴）
+# 工具：mesh 划分为多个 patch（使用固定 Y 轴）
 # -------------------------------------------------------------------------
 def split_mesh_longitudinal(
     mesh: o3d.geometry.TriangleMesh,
     n_patches: int = 2,
 ):
     """
-    沿固定世界坐标 X 轴将 mesh 按三角面片划分为 2 或 3 个子 mesh。
+    沿固定世界坐标 Y 轴将 mesh 按三角面片划分为 2 或 3 个子 mesh。
 
     返回:
       patch_meshes: List[TriangleMesh], 长度 = n_patches
@@ -136,8 +186,8 @@ def split_mesh_longitudinal(
     center = verts.mean(axis=0, keepdims=True)
     verts_centered = verts - center
 
-    # 固定“长轴方向”为世界坐标 X 轴
-    pc_long = np.array([0.0,1.0, 0.0], dtype=np.float64)
+    # 固定“长轴方向”为世界坐标 Y 轴（与现有实现保持一致）
+    pc_long = np.array([0.0, 1.0, 0.0], dtype=np.float64)
 
     # 顶点在固定长轴上的投影
     proj = verts_centered @ pc_long  # (N,)
@@ -365,7 +415,7 @@ def chamfer_distance(pts_pred: np.ndarray, pts_gt: np.ndarray) -> dict:
     return stats
 
 
-def save_nurbs_template(surf, out_dir: Path, patch_id: int):
+def save_nurbs_template(surf, out_dir: Path, roi_name: str, patch_id: int):
     """
     每个 patch 单独保存一个 npz:
       femoral_template_surf_patch{patch_id}.npz
@@ -383,14 +433,17 @@ def save_nurbs_template(surf, out_dir: Path, patch_id: int):
     degree_v = surf.degree_v
 
     np.savez(
-        out_dir / f"femoral_template_surf_patch{patch_id}.npz",
+        out_dir / f"{roi_name}_template_surf_patch{patch_id}.npz",
         ctrlpts=ctrlpts_3d,
         knots_u=knots_u,
         knots_v=knots_v,
         degree_u=degree_u,
         degree_v=degree_v,
     )
-    print(f"NURBS template parameters saved to: {out_dir / f'femoral_template_surf_patch{patch_id}.npz'}")
+    print(
+        "NURBS template parameters saved to: "
+        f"{out_dir / f'{roi_name}_template_surf_patch{patch_id}.npz'}"
+    )
 
 
 # -------------------------------------------------------------------------
@@ -398,19 +451,30 @@ def save_nurbs_template(surf, out_dir: Path, patch_id: int):
 # -------------------------------------------------------------------------
 def main():
     args = parse_args()
-    central_mesh_path = Path(args.central_mesh)
-    out_dir = Path(args.out_dir)
+    roi_id, roi_name = _parse_roi(args.roi)
+    out_dir = (
+        Path(args.out_dir)
+        if args.out_dir is not None
+        else Path(f"{roi_name}_template")
+    )
 
-    print(f"Loading central template mesh from: {central_mesh_path}")
+    default_central = out_dir / f"{roi_name}_average_mesh.ply"
+    central_mesh_path = Path(args.central_mesh) if args.central_mesh else default_central
+
+    print(
+        f"ROI {roi_id} ({roi_name}). Loading central template mesh from: {central_mesh_path}"
+    )
     mesh = o3d.io.read_triangle_mesh(str(central_mesh_path))
     if not mesh.has_vertices():
-        raise RuntimeError("Central mesh has no vertices, please check the path.")
+        raise RuntimeError(
+            f"Central mesh has no vertices, please check the path: {central_mesh_path}"
+        )
 
     mesh.compute_vertex_normals()
     mesh.compute_triangle_normals()
 
-    # ---------- Step 0: 沿固定 X 轴切成多个 patch ----------
-    print(f"Splitting mesh into {args.n_patches} longitudinal patches (fixed X axis)...")
+    # ---------- Step 0: 沿固定 Y 轴切成多个 patch ----------
+    print(f"Splitting mesh into {args.n_patches} longitudinal patches (fixed Y axis)...")
     patch_meshes, pc_long = split_mesh_longitudinal(mesh, n_patches=args.n_patches)
 
     # 用于汇总的 NURBS 点 & NURBS 网格
@@ -427,7 +491,7 @@ def main():
             patch_mesh,
             size_u=args.size_u,
             size_v=args.size_v,
-            long_axis=pc_long,      # 统一的“解剖长轴正方向”（此处为固定 X 轴）
+            long_axis=pc_long,      # 统一的“解剖长轴正方向”（此处为固定 Y 轴）
         )
 
         print(
@@ -447,7 +511,7 @@ def main():
         )
 
         print(f"  Saving NURBS template parameters for patch {pid}...")
-        save_nurbs_template(surf, out_dir, patch_id=pid)
+        save_nurbs_template(surf, out_dir, roi_name=roi_name, patch_id=pid)
 
         # 为 Chamfer 和可视化采样
         pts_nurbs_dense = sample_nurbs_surface(
@@ -503,7 +567,7 @@ def main():
     for k, v in stats.items():
         print(f"  {k}: {v:.4f}")
 
-    stats_path = out_dir / "femoral_template_chamfer_stats.txt"
+    stats_path = out_dir / f"{roi_name}_template_chamfer_stats.txt"
     with open(stats_path, "w") as f:
         for k, v in stats.items():
             f.write(f"{k}: {v:.6f}\n")
@@ -531,7 +595,7 @@ def main():
     combined_mesh.compute_vertex_normals()
     combined_mesh.compute_triangle_normals()
 
-    nurbs_mesh_path = out_dir / "femoral_template_nurbs_mesh_multi.ply"
+    nurbs_mesh_path = out_dir / f"{roi_name}_template_nurbs_mesh_multi.ply"
     o3d.io.write_triangle_mesh(str(nurbs_mesh_path), combined_mesh)
     print(f"Combined multi-patch NURBS mesh saved to: {nurbs_mesh_path}")
 
