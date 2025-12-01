@@ -157,8 +157,10 @@ def evaluate_model(
     roi_label: int = 2,
     margin: int = 8,
     predict_weights: bool = False,
+    device: torch.device | None = None,
 ) -> None:
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if device is None:
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if len(template_paths) == 1:
         template: NURBSTemplate | MultiPatchNURBSTemplate = NURBSTemplate.from_npz(template_paths[0], device)
     else:
@@ -222,7 +224,20 @@ if __name__ == "__main__":
     parser.add_argument(
         "--predict-weights", action="store_true", help="Set if the checkpoint was trained with weight offsets."
     )
+    parser.add_argument(
+        "--gpu",
+        type=int,
+        default=0,
+        help="GPU id to use (e.g. 0, 1, ...).",
+    )
     args = parser.parse_args()
+
+    # create device from gpu id
+    if torch.cuda.is_available():
+        device = torch.device(f"cuda:{args.gpu}")
+    else:
+        device = torch.device("cpu")
+    print(f"Using device: {device}")
 
     roi_id, roi_name = parse_roi(args.roi)
 
@@ -243,4 +258,5 @@ if __name__ == "__main__":
         roi_label=roi_label,
         margin=args.margin,
         predict_weights=args.predict_weights,
+        device=device,
     )
