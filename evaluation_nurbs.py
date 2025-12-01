@@ -16,6 +16,7 @@ small morphological closing to build a solid mask.
 from __future__ import annotations
 
 import argparse
+from collections import deque
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
@@ -51,6 +52,7 @@ def _points_to_mask(
     volume_shape: Tuple[int, int, int],
     spacing: Tuple[float, float, float],
     dilation_iters: int = 2,
+    fill_solid: bool = False,
 ) -> np.ndarray:
     """Rasterize a point cloud onto a voxel grid and apply light smoothing."""
 
@@ -78,7 +80,58 @@ def _points_to_mask(
         tensor = (F.conv3d(tensor, kernel, padding=1) > 0).float()
     for _ in range(dilation_iters):
         tensor = (F.conv3d(tensor, kernel, padding=1) >= kernel.numel()).float()
-    return tensor.squeeze().numpy().astype(np.uint8)
+    shell = tensor.squeeze().numpy().astype(np.uint8)
+    if fill_solid:
+        return _fill_solid(shell)
+    return shell
+
+
+def _fill_solid(mask: np.ndarray) -> np.ndarray:
+    """Fill the interior of a closed surface mask using a 3D flood fill."""
+
+    depth, height, width = mask.shape
+    outside = np.zeros_like(mask, dtype=bool)
+    q: deque[Tuple[int, int, int]] = deque()
+
+    def enqueue_if_background(z: int, y: int, x: int) -> None:
+        if mask[z, y, x] == 0 and not outside[z, y, x]:
+            outside[z, y, x] = True
+            q.append((z, y, x))
+
+    for z in (0, depth - 1):
+        for y in range(height):
+            for x in range(width):
+                enqueue_if_background(z, y, x)
+    for y in (0, height - 1):
+        for z in range(depth):
+            for x in range(width):
+                enqueue_if_background(z, y, x)
+    for x in (0, width - 1):
+        for z in range(depth):
+            for y in range(height):
+                enqueue_if_background(z, y, x)
+
+    neighbors = [
+        (-1, 0, 0),
+        (1, 0, 0),
+        (0, -1, 0),
+        (0, 1, 0),
+        (0, 0, -1),
+        (0, 0, 1),
+    ]
+
+    while q:
+        z, y, x = q.popleft()
+        for dz, dy, dx in neighbors:
+            nz, ny, nx = z + dz, y + dy, x + dx
+            if 0 <= nz < depth and 0 <= ny < height and 0 <= nx < width:
+                if mask[nz, ny, nx] == 0 and not outside[nz, ny, nx]:
+                    outside[nz, ny, nx] = True
+                    q.append((nz, ny, nx))
+
+    filled = mask.copy()
+    filled[(mask == 0) & (~outside)] = 1
+    return filled.astype(np.uint8)
 
 
 def dice_score(pred: np.ndarray, target: np.ndarray) -> float:
@@ -121,6 +174,7 @@ def _evaluate_single(
     volume_path: Path,
     seg_path: Path,
     roi_label: int,
+    roi_name: str,
     margin: int,
     device: torch.device,
 ) -> Tuple[float, float]:
@@ -143,7 +197,10 @@ def _evaluate_single(
     # Move to CPU and drop batch dimension
     pred_points_np = pred_points.squeeze(0).cpu().numpy()
 
-    pred_mask = _points_to_mask(pred_points_np, volume_crop.shape, spacing)
+    fill_solid = roi_name in ("femur", "tibia")
+    pred_mask = _points_to_mask(
+        pred_points_np, volume_crop.shape, spacing, dilation_iters=2, fill_solid=fill_solid
+    )
 
     dsc = dice_score(pred_mask, mask_crop)
     hd = hausdorff_distance(pred_mask, mask_crop)
@@ -154,6 +211,7 @@ def evaluate_model(
     checkpoint_path: Path,
     template_paths: Sequence[Path],
     test_pairs: Iterable[Tuple[Path, Path]],
+    roi_name: str,
     roi_label: int = 2,
     margin: int = 8,
     predict_weights: bool = False,
@@ -173,7 +231,9 @@ def evaluate_model(
     dices: List[float] = []
     hds: List[float] = []
     for idx, (vol_path, seg_path) in enumerate(test_pairs):
-        dsc, hd = _evaluate_single(model, template, vol_path, seg_path, roi_label, margin, device)
+        dsc, hd = _evaluate_single(
+            model, template, vol_path, seg_path, roi_label, roi_name, margin, device
+        )
         dices.append(dsc)
         hds.append(hd)
         print(f"Case {idx:03d} ({vol_path.stem}): Dice={dsc:.4f}, HD={hd:.2f} vox")
@@ -255,6 +315,7 @@ if __name__ == "__main__":
         checkpoint_path=checkpoint_path,
         template_paths=template_paths,
         test_pairs=pairs,
+        roi_name=roi_name,
         roi_label=roi_label,
         margin=args.margin,
         predict_weights=args.predict_weights,
