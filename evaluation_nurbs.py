@@ -20,6 +20,7 @@ from collections import deque
 from pathlib import Path
 from typing import Iterable, List, Sequence, Tuple
 
+import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import torch
@@ -34,6 +35,7 @@ from nurbs_training import (
     crop_to_mask_bbox,
     default_template_paths,
     parse_roi,
+    sample_surface_from_mask,
 )
 
 
@@ -47,21 +49,34 @@ def _load_checkpoint(model: torch.nn.Module, checkpoint_path: Path, device: torc
     return ckpt
 
 
+# NOTE: Predicted NURBS points live in the same physical coordinate system as the
+# cropped volume used during training/evaluation. Because ``crop_to_mask_bbox``
+# shifts the origin away from the full-volume (0, 0, 0), we must subtract the
+# crop origin in millimetres before converting to voxel indices.
 def _points_to_mask(
     points: np.ndarray,
     volume_shape: Tuple[int, int, int],
     spacing: Tuple[float, float, float],
+    *,
+    origin_phys: Tuple[float, float, float] = (0.0, 0.0, 0.0),
     dilation_iters: int = 5,
     fill_solid: bool = False,
 ) -> np.ndarray:
-    """Rasterize a point cloud onto a voxel grid and apply light smoothing."""
+    """Rasterize a point cloud onto a voxel grid and apply light smoothing.
+
+    ``points`` are expected to live in the same physical coordinate system as the
+    cropped volume on which metrics are computed. When the volume is extracted
+    via ``crop_to_mask_bbox``, its origin shifts; ``origin_phys`` should encode
+    that shift in millimetres so we can convert physical coordinates back to
+    voxel indices inside the crop (``(points - origin_phys) / spacing``).
+    """
 
     mask = np.zeros(volume_shape, dtype=np.uint8)
     if points.size == 0:
         return mask
 
     # Convert physical coordinates to voxel indices (z, y, x)
-    coords = np.round(points / np.asarray(spacing)).astype(int)
+    coords = np.round((points - np.asarray(origin_phys)) / np.asarray(spacing)).astype(int)
     z_idx, y_idx, x_idx = coords.T
     valid = (
         (z_idx >= 0)
@@ -158,6 +173,95 @@ def hausdorff_distance(pred: np.ndarray, target: np.ndarray) -> float:
     return max(forward, backward)
 
 
+def _choose_slices(depth: int, vis_num_slices: int) -> List[int]:
+    vis_num_slices = max(1, vis_num_slices)
+    if depth == 0:
+        return [0]
+    candidates = np.linspace(0, depth - 1, num=vis_num_slices).astype(int)
+    return sorted(np.unique(candidates).tolist())
+
+
+def _save_slice_overlays(
+    case_dir: Path,
+    volume_crop: np.ndarray,
+    pred_mask: np.ndarray,
+    gt_mask: np.ndarray,
+    vis_num_slices: int,
+) -> None:
+    slices = _choose_slices(volume_crop.shape[0], vis_num_slices)
+    for idx, z in enumerate(slices):
+        plt.figure(figsize=(6, 6))
+        plt.imshow(volume_crop[z], cmap="gray")
+        plt.imshow(np.ma.masked_where(gt_mask[z] == 0, gt_mask[z]), cmap="Greens", alpha=0.4)
+        plt.imshow(np.ma.masked_where(pred_mask[z] == 0, pred_mask[z]), cmap="Reds", alpha=0.4)
+        plt.title(f"Slice z={z}")
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(case_dir / f"slice_{idx:02d}.png", dpi=150)
+        plt.close()
+
+
+def _save_nifti_masks(
+    case_dir: Path,
+    pred_mask: np.ndarray,
+    gt_mask: np.ndarray,
+    affine: np.ndarray,
+    *,
+    pred_name: str = "pred_mask_crop.nii.gz",
+    gt_name: str = "gt_mask_crop.nii.gz",
+) -> None:
+    nib.save(nib.Nifti1Image(pred_mask.astype(np.uint8), affine), case_dir / pred_name)
+    nib.save(nib.Nifti1Image(gt_mask.astype(np.uint8), affine), case_dir / gt_name)
+
+
+def _embed_crop_to_full(
+    crop_mask: np.ndarray,
+    full_shape: Tuple[int, int, int],
+    bbox: Tuple[int, int, int, int, int, int],
+) -> np.ndarray:
+    full = np.zeros(full_shape, dtype=crop_mask.dtype)
+    z_min, z_max, y_min, y_max, x_min, x_max = bbox
+    full[z_min : z_max + 1, y_min : y_max + 1, x_min : x_max + 1] = crop_mask
+    return full
+
+
+def _save_summary_plots(vis_out_dir: Path, dices: List[float], hds: List[float]) -> None:
+    if dices:
+        plt.figure()
+        plt.hist(dices, bins=10, color="steelblue", edgecolor="black")
+        plt.title("Dice score distribution")
+        plt.xlabel("Dice")
+        plt.ylabel("Count")
+        plt.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        plt.savefig(vis_out_dir / "dice_hist.png", dpi=150)
+        plt.close()
+
+    if dices and hds and len(dices) == len(hds):
+        plt.figure()
+        plt.scatter(dices, hds, c="darkred")
+        plt.title("Dice vs Hausdorff")
+        plt.xlabel("Dice")
+        plt.ylabel("Hausdorff (vox)")
+        plt.grid(True, linestyle="--", alpha=0.5)
+        plt.tight_layout()
+        plt.savefig(vis_out_dir / "dice_vs_hd.png", dpi=150)
+        plt.close()
+
+
+def _run_voxelization_sanity_check() -> None:
+    """Simple synthetic check to ensure voxelization is consistent."""
+
+    spacing = (1.0, 1.0, 1.0)
+    mask = np.zeros((32, 32, 32), dtype=np.uint8)
+    mask[10:22, 12:24, 9:21] = 1
+    pts, _ = sample_surface_from_mask(mask, spacing=spacing, num_samples=4096)
+    recon = _points_to_mask(pts, mask.shape, spacing, origin_phys=(0.0, 0.0, 0.0), dilation_iters=6, fill_solid=True)
+    dsc = dice_score(recon, mask)
+    hd = hausdorff_distance(recon, mask)
+    assert dsc > 0.95 and hd < 2.0, f"Sanity check failed: Dice={dsc:.3f}, HD={hd:.3f}"
+
+
 def _build_model(template: NURBSTemplate | MultiPatchNURBSTemplate, predict_weights: bool, device: torch.device) -> CartilageUNet:
     model = CartilageUNet(
         in_channels=1,
@@ -177,7 +281,18 @@ def _evaluate_single(
     roi_name: str,
     margin: int,
     device: torch.device,
-) -> Tuple[float, float]:
+    debug: bool = False,
+) -> Tuple[
+    float,
+    float,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    Tuple[int, int, int, int, int, int],
+    Tuple[float, float, float],
+    Tuple[int, int, int],
+    np.ndarray,
+]:
     vol_img = nib.load(str(volume_path))
     seg_img = nib.load(str(seg_path))
 
@@ -186,7 +301,7 @@ def _evaluate_single(
     mask = (seg == roi_label).astype(np.uint8)
     spacing = vol_img.header.get_zooms()
 
-    volume_crop, mask_crop = crop_to_mask_bbox(volume, mask, margin=margin)
+    volume_crop, mask_crop, bbox = crop_to_mask_bbox(volume, mask, margin=margin, return_bbox=True)
     volume_tensor = torch.from_numpy(volume_crop)[None, None].to(device)
 
     model.eval()
@@ -197,14 +312,37 @@ def _evaluate_single(
     # Move to CPU and drop batch dimension
     pred_points_np = pred_points.squeeze(0).cpu().numpy()
 
+    # Bounding box origin in physical units (z, y, x)
+    origin_phys = (
+        float(bbox[0] * spacing[0]),
+        float(bbox[2] * spacing[1]),
+        float(bbox[4] * spacing[2]),
+    )
+
+    if debug:
+        gt_coords = np.argwhere(mask_crop > 0)
+        gt_min = gt_coords.min(axis=0) if gt_coords.size else np.array([0, 0, 0])
+        gt_max = gt_coords.max(axis=0) if gt_coords.size else np.array(volume_crop.shape) - 1
+        print(
+            f"[DEBUG] volume_crop shape: {volume_crop.shape}, spacing: {spacing}",
+            f"\n[DEBUG] bbox (z_min,z_max,y_min,y_max,x_min,x_max): {bbox}",
+            f"\n[DEBUG] pred_points range (min->max per axis, phys): {pred_points_np.min(axis=0)} -> {pred_points_np.max(axis=0)}",
+            f"\n[DEBUG] gt mask voxel range (crop idx): {gt_min} -> {gt_max}",
+        )
+
     fill_solid = roi_name in ("femur", "tibia")
     pred_mask = _points_to_mask(
-        pred_points_np, volume_crop.shape, spacing, dilation_iters=12, fill_solid=fill_solid
+        pred_points_np,
+        volume_crop.shape,
+        spacing,
+        origin_phys=origin_phys,
+        dilation_iters=12,
+        fill_solid=fill_solid,
     )
 
     dsc = dice_score(pred_mask, mask_crop)
     hd = hausdorff_distance(pred_mask, mask_crop)
-    return dsc, hd
+    return dsc, hd, pred_mask, mask_crop, volume_crop, bbox, spacing, volume.shape, vol_img.affine
 
 
 def evaluate_model(
@@ -216,6 +354,10 @@ def evaluate_model(
     margin: int = 8,
     predict_weights: bool = False,
     device: torch.device | None = None,
+    vis_out_dir: Path | None = None,
+    vis_num_slices: int = 3,
+    vis_full_volume: bool = False,
+    run_sanity_check: bool = False,
 ) -> None:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -228,15 +370,60 @@ def evaluate_model(
     ckpt = _load_checkpoint(model, checkpoint_path, device)
     print(f"Loaded checkpoint from epoch {ckpt.get('epoch', '?')} with val metrics: {ckpt.get('val_metrics', {})}")
 
+    if run_sanity_check:
+        _run_voxelization_sanity_check()
+        print("Voxelization sanity check passed.")
+
+    if vis_out_dir is not None:
+        vis_out_dir.mkdir(parents=True, exist_ok=True)
+
     dices: List[float] = []
     hds: List[float] = []
     for idx, (vol_path, seg_path) in enumerate(test_pairs):
-        dsc, hd = _evaluate_single(
-            model, template, vol_path, seg_path, roi_label, roi_name, margin, device
+        (
+            dsc,
+            hd,
+            pred_mask,
+            mask_crop,
+            volume_crop,
+            bbox,
+            spacing,
+            full_shape,
+            affine,
+        ) = _evaluate_single(
+            model,
+            template,
+            vol_path,
+            seg_path,
+            roi_label,
+            roi_name,
+            margin,
+            device,
+            debug=(idx == 0),
         )
         dices.append(dsc)
         hds.append(hd)
         print(f"Case {idx:03d} ({vol_path.stem}): Dice={dsc:.4f}, HD={hd:.2f} vox")
+
+        if vis_out_dir is not None:
+            case_dir = vis_out_dir / f"vis_case_{idx:03d}_{vol_path.stem}"
+            case_dir.mkdir(parents=True, exist_ok=True)
+            _save_nifti_masks(case_dir, pred_mask, mask_crop, affine)
+            _save_slice_overlays(case_dir, volume_crop, pred_mask, mask_crop, vis_num_slices)
+
+            if vis_full_volume:
+                pred_full = _embed_crop_to_full(pred_mask, full_shape, bbox)
+                gt_full = _embed_crop_to_full(mask_crop, full_shape, bbox)
+                _save_nifti_masks(
+                    case_dir,
+                    pred_full,
+                    gt_full,
+                    affine,
+                    pred_name="pred_mask_full.nii.gz",
+                    gt_name="gt_mask_full.nii.gz",
+                )
+
+            print(f"Saved visualizations for case {idx:03d} to {case_dir}")
 
     if dices:
         print("\nAverage metrics across test set:")
@@ -244,6 +431,9 @@ def evaluate_model(
         print(f"Hausdorff: {np.mean(hds):.2f} ± {np.std(hds):.2f} vox")
     else:
         print("No test volumes found—nothing to evaluate.")
+
+    if vis_out_dir is not None:
+        _save_summary_plots(vis_out_dir, dices, hds)
 
 
 if __name__ == "__main__":
@@ -290,6 +480,28 @@ if __name__ == "__main__":
         default=0,
         help="GPU id to use (e.g. 0, 1, ...).",
     )
+    parser.add_argument(
+        "--vis-out-dir",
+        type=Path,
+        default=None,
+        help="If set, save NIfTI masks and slice overlays for each case to this directory.",
+    )
+    parser.add_argument(
+        "--vis-num-slices",
+        type=int,
+        default=3,
+        help="Number of axial slices to visualize per case when saving overlays.",
+    )
+    parser.add_argument(
+        "--vis-full-volume",
+        action="store_true",
+        help="Also save predicted/GT masks embedded back into the full volume space.",
+    )
+    parser.add_argument(
+        "--run-sanity-check",
+        action="store_true",
+        help="Run a small voxelization sanity test before evaluating the dataset.",
+    )
     args = parser.parse_args()
 
     # create device from gpu id
@@ -320,4 +532,8 @@ if __name__ == "__main__":
         margin=args.margin,
         predict_weights=args.predict_weights,
         device=device,
+        vis_out_dir=args.vis_out_dir,
+        vis_num_slices=args.vis_num_slices,
+        vis_full_volume=args.vis_full_volume,
+        run_sanity_check=args.run_sanity_check,
     )
