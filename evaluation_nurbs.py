@@ -24,6 +24,7 @@ import nibabel as nib
 import numpy as np
 import torch
 import torch.nn.functional as F
+import matplotlib.pyplot as plt
 
 from nurbs_training import (
     CartilageDataset,
@@ -31,7 +32,6 @@ from nurbs_training import (
     CartilageUNet,
     MultiPatchNURBSTemplate,
     NURBSTemplate,
-    crop_to_mask_bbox,
     default_template_paths,
     parse_roi,
 )
@@ -134,6 +134,37 @@ def _fill_solid(mask: np.ndarray) -> np.ndarray:
     return filled.astype(np.uint8)
 
 
+def _compute_bbox(mask: np.ndarray, margin: int) -> Tuple[int, int, int, int, int, int]:
+    coords = np.argwhere(mask > 0)
+    if coords.size == 0:
+        return (
+            0,
+            mask.shape[0] - 1,
+            0,
+            mask.shape[1] - 1,
+            0,
+            mask.shape[2] - 1,
+        )
+
+    z_min, y_min, x_min = coords.min(axis=0)
+    z_max, y_max, x_max = coords.max(axis=0)
+
+    z_min = max(z_min - margin, 0)
+    y_min = max(y_min - margin, 0)
+    x_min = max(x_min - margin, 0)
+
+    z_max = min(z_max + margin, mask.shape[0] - 1)
+    y_max = min(y_max + margin, mask.shape[1] - 1)
+    x_max = min(x_max + margin, mask.shape[2] - 1)
+
+    return z_min, z_max, y_min, y_max, x_min, x_max
+
+
+def _crop_with_bbox(array: np.ndarray, bbox: Tuple[int, int, int, int, int, int]) -> np.ndarray:
+    z_min, z_max, y_min, y_max, x_min, x_max = bbox
+    return array[z_min : z_max + 1, y_min : y_max + 1, x_min : x_max + 1]
+
+
 def dice_score(pred: np.ndarray, target: np.ndarray) -> float:
     pred = pred.astype(bool)
     target = target.astype(bool)
@@ -177,6 +208,10 @@ def _evaluate_single(
     roi_name: str,
     margin: int,
     device: torch.device,
+    vis_out_dir: Path | None = None,
+    vis_num_slices: int = 3,
+    vis_full_volume: bool = False,
+    vis_case_idx: int | None = None,
 ) -> Tuple[float, float]:
     vol_img = nib.load(str(volume_path))
     seg_img = nib.load(str(seg_path))
@@ -186,7 +221,9 @@ def _evaluate_single(
     mask = (seg == roi_label).astype(np.uint8)
     spacing = vol_img.header.get_zooms()
 
-    volume_crop, mask_crop = crop_to_mask_bbox(volume, mask, margin=margin)
+    bbox = _compute_bbox(mask, margin)
+    volume_crop = _crop_with_bbox(volume, bbox)
+    mask_crop = _crop_with_bbox(mask, bbox)
     volume_tensor = torch.from_numpy(volume_crop)[None, None].to(device)
 
     model.eval()
@@ -204,7 +241,72 @@ def _evaluate_single(
 
     dsc = dice_score(pred_mask, mask_crop)
     hd = hausdorff_distance(pred_mask, mask_crop)
+
+    if vis_out_dir is not None:
+        _save_case_visualizations(
+            idx=vis_case_idx,
+            vol_path=volume_path,
+            vis_out_dir=vis_out_dir,
+            volume=volume,
+            volume_crop=volume_crop,
+            mask_crop=mask_crop,
+            pred_mask=pred_mask,
+            affine=vol_img.affine,
+            bbox=bbox,
+            vis_num_slices=vis_num_slices,
+            vis_full_volume=vis_full_volume,
+        )
+
     return dsc, hd
+
+
+def _save_case_visualizations(
+    idx: int | None,
+    vol_path: Path,
+    vis_out_dir: Path,
+    volume: np.ndarray,
+    volume_crop: np.ndarray,
+    mask_crop: np.ndarray,
+    pred_mask: np.ndarray,
+    affine: np.ndarray,
+    bbox: Tuple[int, int, int, int, int, int],
+    vis_num_slices: int,
+    vis_full_volume: bool,
+) -> None:
+    vis_out_dir.mkdir(parents=True, exist_ok=True)
+    case_prefix = f"vis_case_{idx:03d}" if idx is not None else "vis_case"
+    case_vis_dir = vis_out_dir / f"{case_prefix}_{vol_path.stem}"
+    case_vis_dir.mkdir(exist_ok=True)
+
+    nib.save(nib.Nifti1Image(mask_crop.astype(np.uint8), affine), case_vis_dir / "gt_mask_crop.nii.gz")
+    nib.save(nib.Nifti1Image(pred_mask.astype(np.uint8), affine), case_vis_dir / "pred_mask_crop.nii.gz")
+
+    if vis_full_volume:
+        z_min, z_max, y_min, y_max, x_min, x_max = bbox
+        pred_full = np.zeros_like(volume, dtype=np.uint8)
+        gt_full = np.zeros_like(volume, dtype=np.uint8)
+        pred_full[z_min : z_max + 1, y_min : y_max + 1, x_min : x_max + 1] = pred_mask
+        gt_full[z_min : z_max + 1, y_min : y_max + 1, x_min : x_max + 1] = mask_crop
+        nib.save(nib.Nifti1Image(pred_full, affine), case_vis_dir / "pred_mask_full.nii.gz")
+        nib.save(nib.Nifti1Image(gt_full, affine), case_vis_dir / "gt_mask_full.nii.gz")
+
+    depth = volume_crop.shape[0]
+    slices = np.linspace(0, depth - 1, num=max(vis_num_slices, 1), dtype=int)
+    for k, z in enumerate(np.unique(slices)):
+        slice_img = volume_crop[z]
+        plt.figure(figsize=(6, 6))
+        plt.imshow(slice_img, cmap="gray")
+        plt.imshow(np.ma.masked_where(mask_crop[z] == 0, mask_crop[z]), cmap="Greens", alpha=0.4)
+        plt.imshow(np.ma.masked_where(pred_mask[z] == 0, pred_mask[z]), cmap="Reds", alpha=0.4)
+        plt.axis("off")
+        plt.tight_layout()
+        plt.savefig(case_vis_dir / f"slice_{k:02d}.png", dpi=150)
+        plt.close()
+
+    if idx is not None:
+        print(f"Saved visualizations for case {idx:03d} to {case_vis_dir}")
+    else:
+        print(f"Saved visualizations to {case_vis_dir}")
 
 
 def evaluate_model(
@@ -216,6 +318,10 @@ def evaluate_model(
     margin: int = 8,
     predict_weights: bool = False,
     device: torch.device | None = None,
+    vis_out_dir: Path | None = None,
+    vis_num_slices: int = 3,
+    vis_full_volume: bool = False,
+    max_cases: int | None = None,
 ) -> None:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -230,9 +336,26 @@ def evaluate_model(
 
     dices: List[float] = []
     hds: List[float] = []
+    test_pairs = list(test_pairs)
+    if max_cases is not None and max_cases > 0:
+        if max_cases < len(test_pairs):
+            print(f"Evaluating first {max_cases} of {len(test_pairs)} cases as requested.")
+        test_pairs = test_pairs[:max_cases]
+
     for idx, (vol_path, seg_path) in enumerate(test_pairs):
         dsc, hd = _evaluate_single(
-            model, template, vol_path, seg_path, roi_label, roi_name, margin, device
+            model,
+            template,
+            vol_path,
+            seg_path,
+            roi_label,
+            roi_name,
+            margin,
+            device,
+            vis_out_dir=vis_out_dir,
+            vis_num_slices=vis_num_slices,
+            vis_full_volume=vis_full_volume,
+            vis_case_idx=idx,
         )
         dices.append(dsc)
         hds.append(hd)
@@ -242,6 +365,29 @@ def evaluate_model(
         print("\nAverage metrics across test set:")
         print(f"Dice: {np.mean(dices):.4f} ± {np.std(dices):.4f}")
         print(f"Hausdorff: {np.mean(hds):.2f} ± {np.std(hds):.2f} vox")
+
+        if vis_out_dir is not None:
+            vis_out_dir.mkdir(parents=True, exist_ok=True)
+
+            plt.figure()
+            plt.hist(dices, bins=min(len(dices), 20))
+            plt.title("Dice Score Distribution")
+            plt.xlabel("Dice score")
+            plt.ylabel("Count")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(vis_out_dir / "dice_hist.png", dpi=150)
+            plt.close()
+
+            plt.figure()
+            plt.scatter(dices, hds)
+            plt.title("Dice vs. Hausdorff Distance")
+            plt.xlabel("Dice")
+            plt.ylabel("HD (vox)")
+            plt.grid(True)
+            plt.tight_layout()
+            plt.savefig(vis_out_dir / "dice_vs_hd.png", dpi=150)
+            plt.close()
     else:
         print("No test volumes found—nothing to evaluate.")
 
@@ -290,6 +436,29 @@ if __name__ == "__main__":
         default=0,
         help="GPU id to use (e.g. 0, 1, ...).",
     )
+    parser.add_argument(
+        "--vis-out-dir",
+        type=Path,
+        default=None,
+        help="Directory to write visualization artifacts (one subfolder per case).",
+    )
+    parser.add_argument(
+        "--vis-num-slices",
+        type=int,
+        default=3,
+        help="Number of axial slices through the cropped volume to visualize per case.",
+    )
+    parser.add_argument(
+        "--vis-full-volume",
+        action="store_true",
+        help="Reconstruct and save full-volume NIfTI masks alongside cropped masks.",
+    )
+    parser.add_argument(
+        "--max-cases",
+        type=int,
+        default=10,
+        help="Limit evaluation to the first N cases (set <=0 to evaluate all).",
+    )
     args = parser.parse_args()
 
     # create device from gpu id
@@ -320,4 +489,8 @@ if __name__ == "__main__":
         margin=args.margin,
         predict_weights=args.predict_weights,
         device=device,
+        vis_out_dir=args.vis_out_dir,
+        vis_num_slices=args.vis_num_slices,
+        vis_full_volume=args.vis_full_volume,
+        max_cases=args.max_cases if args.max_cases and args.max_cases > 0 else None,
     )
