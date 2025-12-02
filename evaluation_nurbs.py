@@ -321,7 +321,6 @@ def evaluate_model(
     vis_out_dir: Path | None = None,
     vis_num_slices: int = 3,
     vis_full_volume: bool = False,
-    max_cases: int | None = None,
 ) -> None:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -453,12 +452,6 @@ if __name__ == "__main__":
         action="store_true",
         help="Reconstruct and save full-volume NIfTI masks alongside cropped masks.",
     )
-    parser.add_argument(
-        "--max-cases",
-        type=int,
-        default=10,
-        help="Limit evaluation to the first N cases (set <=0 to evaluate all).",
-    )
     args = parser.parse_args()
 
     # create device from gpu id
@@ -492,5 +485,4 @@ if __name__ == "__main__":
         vis_out_dir=args.vis_out_dir,
         vis_num_slices=args.vis_num_slices,
         vis_full_volume=args.vis_full_volume,
-        max_cases=args.max_cases if args.max_cases and args.max_cases > 0 else None,
     )
