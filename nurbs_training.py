@@ -487,19 +487,23 @@ def sample_surface_from_mask(mask: np.ndarray,
     return sampled_pts, sampled_normals
 
 
-def crop_to_mask_bbox(volume: np.ndarray,
-                      mask: np.ndarray,
-                      margin: int = 8) -> Tuple[np.ndarray, np.ndarray]:
+def crop_to_mask_bbox(
+    volume: np.ndarray,
+    mask: np.ndarray,
+    margin: int = 8,
+    return_bbox: bool = False,
+) -> Tuple[np.ndarray, np.ndarray] | Tuple[np.ndarray, np.ndarray, Tuple[int, int, int, int, int, int]]:
     """
     根据 mask 的非零体素做 3D bbox 裁剪，并在三维方向各加 margin 体素。
-    返回裁剪后的 (volume_crop, mask_crop)。
+    返回裁剪后的 (volume_crop, mask_crop)；如果 ``return_bbox`` 为 True，额外返回
+    裁剪区域在原始体素坐标系下的 (z_min, z_max, y_min, y_max, x_min, x_max)。
 
     volume, mask 形状: (D, H, W)
     """
     coords = np.argwhere(mask > 0)
     if coords.size == 0:
         # 没有 ROI，直接返回原图（不会用于训练）
-        return volume, mask
+        return (volume, mask, (0, volume.shape[0] - 1, 0, volume.shape[1] - 1, 0, volume.shape[2] - 1)) if return_bbox else (volume, mask)
 
     z_min, y_min, x_min = coords.min(axis=0)
     z_max, y_max, x_max = coords.max(axis=0)
@@ -518,6 +522,8 @@ def crop_to_mask_bbox(volume: np.ndarray,
     mask_crop = mask[z_min : z_max + 1,
                      y_min : y_max + 1,
                      x_min : x_max + 1]
+    if return_bbox:
+        return volume_crop, mask_crop, (z_min, z_max, y_min, y_max, x_min, x_max)
     return volume_crop, mask_crop
 
 
