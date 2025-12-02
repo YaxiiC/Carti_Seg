@@ -336,10 +336,6 @@ def evaluate_model(
     dices: List[float] = []
     hds: List[float] = []
     test_pairs = list(test_pairs)
-    if max_cases is not None and max_cases > 0:
-        if max_cases < len(test_pairs):
-            print(f"Evaluating first {max_cases} of {len(test_pairs)} cases as requested.")
-        test_pairs = test_pairs[:max_cases]
 
     for idx, (vol_path, seg_path) in enumerate(test_pairs):
         dsc, hd = _evaluate_single(
