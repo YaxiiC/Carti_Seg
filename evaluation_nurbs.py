@@ -51,7 +51,7 @@ def _points_to_mask(
     points: np.ndarray,
     volume_shape: Tuple[int, int, int],
     spacing: Tuple[float, float, float],
-    dilation_iters: int = 2,
+    dilation_iters: int = 5,
     fill_solid: bool = False,
 ) -> np.ndarray:
     """Rasterize a point cloud onto a voxel grid and apply light smoothing."""
