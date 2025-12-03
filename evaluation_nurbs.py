@@ -52,10 +52,17 @@ def _points_to_mask(
     volume_shape: Tuple[int, int, int],
     spacing: Tuple[float, float, float],
     dilation_iters: int = 5,
-    #erosion_iters: int = 5,
-    fill_solid: bool = False,
+    fill_solid: bool = True,
 ) -> np.ndarray:
-    """Rasterize a point cloud onto a voxel grid and apply light smoothing."""
+    """Rasterize a point cloud onto a voxel grid and apply light smoothing.
+
+    The default behavior now generates a *solid* mask from the predicted surface
+    samples. During early experiments the voxelization step only produced a
+    thin shell for cartilage classes, which severely deflated Dice scores even
+    when the surface geometry was reasonable. Filling the closed surface volume
+    ensures the voxel mask matches the ground-truth topology used for training
+    and metrics.
+    """
 
     mask = np.zeros(volume_shape, dtype=np.uint8)
     if points.size == 0:
@@ -245,6 +252,8 @@ def _evaluate_single(
     vis_num_slices: int = 3,
     vis_full_volume: bool = False,
     vis_case_idx: int | None = None,
+    fill_solid: bool = True,
+    dilation_iters: int = 13,
 ) -> Tuple[float, float]:
     vol_img = nib.load(str(volume_path))
     seg_img = nib.load(str(seg_path))
@@ -267,9 +276,12 @@ def _evaluate_single(
     # Move to CPU and drop batch dimension
     pred_points_np = pred_points.squeeze(0).cpu().numpy()
 
-    fill_solid = roi_name in ("femur", "tibia")
     pred_mask = _points_to_mask(
-        pred_points_np, volume_crop.shape, spacing, dilation_iters=13, fill_solid=fill_solid
+        pred_points_np,
+        volume_crop.shape,
+        spacing,
+        dilation_iters=dilation_iters,
+        fill_solid=fill_solid,
     )
 
     dsc = dice_score(pred_mask, mask_crop)
@@ -353,6 +365,8 @@ def evaluate_model(
     vis_out_dir: Path | None = None,
     vis_num_slices: int = 3,
     vis_full_volume: bool = False,
+    fill_solid: bool = True,
+    dilation_iters: int = 13,
 ) -> None:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -383,6 +397,8 @@ def evaluate_model(
             vis_num_slices=vis_num_slices,
             vis_full_volume=vis_full_volume,
             vis_case_idx=idx,
+            fill_solid=fill_solid,
+            dilation_iters=dilation_iters,
         )
         dices.append(dsc)
         hds.append(hd)
@@ -480,6 +496,17 @@ if __name__ == "__main__":
         action="store_true",
         help="Reconstruct and save full-volume NIfTI masks alongside cropped masks.",
     )
+    parser.add_argument(
+        "--no-fill-solid",
+        action="store_true",
+        help="Disable solid fill; keeps only the voxelized surface shell.",
+    )
+    parser.add_argument(
+        "--dilation-iters",
+        type=int,
+        default=13,
+        help="Number of 3x3x3 convolution iterations for closing the voxelized surface.",
+    )
     args = parser.parse_args()
 
     # create device from gpu id
@@ -515,4 +542,6 @@ if __name__ == "__main__":
         vis_out_dir=args.vis_out_dir,
         vis_num_slices=args.vis_num_slices,
         vis_full_volume=args.vis_full_volume,
+        fill_solid=not args.no_fill_solid,
+        dilation_iters=args.dilation_iters,
     )
