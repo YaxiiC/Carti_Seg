@@ -83,7 +83,7 @@ def _points_to_mask(
 
     # Morphological closing implemented with torch convolutions to avoid SciPy
     tensor = torch.from_numpy(mask[None, None].astype(np.float32))
-    kernel = torch.ones((1, 1, 2, 2, 2), dtype=torch.float32)
+    kernel = torch.ones((1, 1, 3, 3, 3), dtype=torch.float32)
     for _ in range(dilation_iters):
         tensor = (F.conv3d(tensor, kernel, padding=1) > 0).float()
     for _ in range(dilation_iters):
