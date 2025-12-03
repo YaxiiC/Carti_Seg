@@ -269,7 +269,7 @@ def _evaluate_single(
 
     fill_solid = roi_name in ("femur", "tibia")
     pred_mask = _points_to_mask(
-        pred_points_np, volume_crop.shape, spacing, dilation_iters=3, fill_solid=fill_solid
+        pred_points_np, volume_crop.shape, spacing, dilation_iters=13, fill_solid=fill_solid
     )
 
     dsc = dice_score(pred_mask, mask_crop)
