@@ -52,7 +52,7 @@ def _points_to_mask(
     volume_shape: Tuple[int, int, int],
     spacing: Tuple[float, float, float],
     dilation_iters: int = 5,
-    erosion_iters: int = 5,
+    #erosion_iters: int = 5,
     fill_solid: bool = False,
 ) -> np.ndarray:
     """Rasterize a point cloud onto a voxel grid and apply light smoothing."""
@@ -79,8 +79,8 @@ def _points_to_mask(
     kernel = torch.ones((1, 1, 3, 3, 3), dtype=torch.float32)
     for _ in range(dilation_iters):
         tensor = (F.conv3d(tensor, kernel, padding=1) > 0).float()
-    for _ in range(erosion_iters):
-        tensor = (F.conv3d(tensor, kernel, padding=1) >= kernel.numel()).float()
+    #for _ in range(erosion_iters):
+     #   tensor = (F.conv3d(tensor, kernel, padding=1) >= kernel.numel()).float()
     shell = tensor.squeeze().numpy().astype(np.uint8)
     if fill_solid:
         return _fill_solid(shell)
@@ -237,7 +237,7 @@ def _evaluate_single(
 
     fill_solid = roi_name in ("femur", "tibia")
     pred_mask = _points_to_mask(
-        pred_points_np, volume_crop.shape, spacing, dilation_iters=10, erosion_iters=3, fill_solid=fill_solid
+        pred_points_np, volume_crop.shape, spacing, dilation_iters=8, fill_solid=fill_solid
     )
 
     dsc = dice_score(pred_mask, mask_crop)
