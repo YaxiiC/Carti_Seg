@@ -465,6 +465,8 @@ if __name__ == "__main__":
     seg_paths = sorted(labels_dir.glob("*.nii.gz"))
     pairs = list(zip(volume_paths, seg_paths))
 
+    pairs = pairs[:3]
+
     template_paths = args.templates or default_template_paths(roi_name, n_patches=args.n_patches)
     checkpoint_path = args.checkpoint or Path(f"{roi_name}_best_model.pth")
     roi_label = args.roi_label if args.roi_label is not None else roi_id
