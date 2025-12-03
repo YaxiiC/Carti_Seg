@@ -31,6 +31,8 @@ import numpy as np
 import open3d as o3d
 from geomdl import BSpline
 
+from template_utils import DEFAULT_MAX_DIST_ON_TEMPLATE, filter_points_near_template, sample_template_points
+
 ROI_FEMUR = 1
 ROI_FEMORAL_CARTILAGE = 2
 ROI_TIBIA = 3
@@ -110,6 +112,18 @@ def parse_args():
         type=float,
         default=10.0,
         help="Margin (mm) around template bbox for keeping NURBS points.",
+    )
+    p.add_argument(
+        "--max_dist_on_template",
+        type=float,
+        default=DEFAULT_MAX_DIST_ON_TEMPLATE,
+        help="Maximum distance (mm) from template surface to keep NURBS samples.",
+    )
+    p.add_argument(
+        "--n_template_points",
+        type=int,
+        default=20000,
+        help="Number of points to sample on template mesh for distance filtering.",
     )
     p.add_argument(
         "--n_u",
@@ -232,6 +246,10 @@ def main():
     bb_min = verts_template.min(axis=0)
     bb_max = verts_template.max(axis=0)
     print(f"Template bbox min: {bb_min}, max: {bb_max}")
+    pts_template = sample_template_points(central, n_points=args.n_template_points)
+    print(
+        f"Sampled {pts_template.shape[0]} template points for distance filtering (max_dist_on_template={args.max_dist_on_template} mm)"
+    )
 
     # 为不同 patch 准备几种颜色
     patch_colors = [
@@ -271,6 +289,16 @@ def main():
         )
         if pts_nurbs_filt.shape[0] == 0:
             print(f"  WARNING: all points of patch {pid} filtered out; consider increasing --bbox_margin.")
+            continue
+
+        pts_nurbs_filt = filter_points_near_template(
+            pts_nurbs_filt,
+            pts_template,
+            max_dist=args.max_dist_on_template,
+        )
+        print(
+            f"  Patch {pid}: kept {pts_nurbs_filt.shape[0]} points within {args.max_dist_on_template} mm of template"
+        )
 
         # 点云
         pcd = o3d.geometry.PointCloud()
