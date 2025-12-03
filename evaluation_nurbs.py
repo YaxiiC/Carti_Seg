@@ -296,8 +296,7 @@ def _save_case_visualizations(
         slice_img = volume_crop[z]
         plt.figure(figsize=(6, 6))
         plt.imshow(slice_img, cmap="gray")
-        plt.imshow(np.ma.masked_where(mask_crop[z] == 0, mask_crop[z]), cmap="Greens", alpha=0.4)
-        plt.imshow(np.ma.masked_where(pred_mask[z] == 0, pred_mask[z]), cmap="Reds", alpha=0.4)
+        plt.imshow(np.ma.masked_where(pred_mask[z] == 0, pred_mask[z]), cmap="Greens", alpha=0.4)
         plt.axis("off")
         plt.tight_layout()
         plt.savefig(case_vis_dir / f"slice_{k:02d}.png", dpi=150)
