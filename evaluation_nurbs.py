@@ -35,6 +35,11 @@ from nurbs_training import (
     default_template_paths,
     parse_roi,
 )
+from template_utils import (
+    DEFAULT_MAX_DIST_ON_TEMPLATE,
+    filter_points_near_template,
+    sample_template_points,
+)
 
 
 def _load_checkpoint(model: torch.nn.Module, checkpoint_path: Path, device: torch.device) -> dict:
@@ -248,6 +253,8 @@ def _evaluate_single(
     roi_name: str,
     margin: int,
     device: torch.device,
+    template_points: np.ndarray,
+    max_dist_on_template: float,
     vis_out_dir: Path | None = None,
     vis_num_slices: int = 3,
     vis_full_volume: bool = False,
@@ -275,6 +282,16 @@ def _evaluate_single(
 
     # Move to CPU and drop batch dimension
     pred_points_np = pred_points.squeeze(0).cpu().numpy()
+    n_pred_all = pred_points_np.shape[0]
+    pred_points_np = filter_points_near_template(
+        pred_points_np,
+        template_points,
+        max_dist=max_dist_on_template,
+    )
+    print(
+        f"Filtered predicted NURBS samples: {pred_points_np.shape[0]} / {n_pred_all} "
+        f"within {max_dist_on_template} mm of template surface"
+    )
 
     pred_mask = _points_to_mask(
         pred_points_np,
@@ -367,7 +384,11 @@ def evaluate_model(
     vis_full_volume: bool = False,
     fill_solid: bool = True,
     dilation_iters: int = 5,
+    template_points: np.ndarray | None = None,
+    max_dist_on_template: float = DEFAULT_MAX_DIST_ON_TEMPLATE,
 ) -> None:
+    if template_points is None:
+        raise ValueError("template_points must be provided for distance filtering.")
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if len(template_paths) == 1:
@@ -393,6 +414,8 @@ def evaluate_model(
             roi_name,
             margin,
             device,
+            template_points,
+            max_dist_on_template,
             vis_out_dir=vis_out_dir,
             vis_num_slices=vis_num_slices,
             vis_full_volume=vis_full_volume,
@@ -507,6 +530,24 @@ if __name__ == "__main__":
         default=13,
         help="Number of 3x3x3 convolution iterations for closing the voxelized surface.",
     )
+    parser.add_argument(
+        "--template-mesh",
+        type=Path,
+        default=None,
+        help="Template mesh (.ply) used to filter predicted NURBS samples (defaults to <roi_name>_average_mesh.ply).",
+    )
+    parser.add_argument(
+        "--n-template-points",
+        type=int,
+        default=20000,
+        help="Number of points sampled on template mesh for filtering.",
+    )
+    parser.add_argument(
+        "--max-dist-on-template",
+        type=float,
+        default=DEFAULT_MAX_DIST_ON_TEMPLATE,
+        help="Maximum distance (mm) from template surface to keep NURBS samples.",
+    )
     args = parser.parse_args()
 
     # create device from gpu id
@@ -529,6 +570,14 @@ if __name__ == "__main__":
     template_paths = args.templates or default_template_paths(roi_name, n_patches=args.n_patches)
     checkpoint_path = args.checkpoint or Path(f"{roi_name}_best_model.pth")
     roi_label = args.roi_label if args.roi_label is not None else roi_id
+    template_mesh = args.template_mesh or Path(f"{roi_name}_average_mesh.ply")
+    template_points = sample_template_points(
+        template_mesh, n_points=args.n_template_points
+    )
+    print(
+        f"Sampled {template_points.shape[0]} template points from {template_mesh} "
+        f"for distance filtering (max_dist_on_template={args.max_dist_on_template} mm)."
+    )
 
     evaluate_model(
         checkpoint_path=checkpoint_path,
@@ -544,4 +593,6 @@ if __name__ == "__main__":
         vis_full_volume=args.vis_full_volume,
         fill_solid=not args.no_fill_solid,
         dilation_iters=args.dilation_iters,
+        template_points=template_points,
+        max_dist_on_template=args.max_dist_on_template,
     )

@@ -42,6 +42,8 @@ import open3d as o3d
 from geomdl import BSpline, utilities
 from scipy.spatial import cKDTree
 
+from template_utils import DEFAULT_MAX_DIST_ON_TEMPLATE, filter_points_near_template
+
 ROI_FEMUR = 1
 ROI_FEMORAL_CARTILAGE = 2
 ROI_TIBIA = 3
@@ -159,6 +161,12 @@ def parse_args():
         type=float,
         default=10.0,
         help="Margin (mm) around template bbox to keep NURBS points for Chamfer.",
+    )
+    p.add_argument(
+        "--max_dist_on_template",
+        type=float,
+        default=DEFAULT_MAX_DIST_ON_TEMPLATE,
+        help="Maximum distance (mm) from template surface to keep NURBS samples.",
     )
     return p.parse_args()
 
@@ -545,12 +553,23 @@ def main():
     )
     pts_nurbs_filtered = pts_nurbs_dense_all[mask]
     print(
-        f"Filtered NURBS points: {pts_nurbs_filtered.shape[0]} / "
+        f"Filtered NURBS points (bbox): {pts_nurbs_filtered.shape[0]} / "
         f"{pts_nurbs_dense_all.shape[0]} kept within bbox ± {margin} mm"
     )
 
     if pts_nurbs_filtered.shape[0] == 0:
         raise RuntimeError("All NURBS samples were filtered out; try increasing bbox_margin.")
+
+    print(
+        f"Applying template distance filter (max_dist_on_template={args.max_dist_on_template} mm)..."
+    )
+    pts_nurbs_filtered = filter_points_near_template(
+        pts_nurbs_filtered, pts_template, max_dist=args.max_dist_on_template
+    )
+    print(
+        f"Filtered NURBS points (distance): {pts_nurbs_filtered.shape[0]} / "
+        f"{mask.sum()} kept within {args.max_dist_on_template} mm of template"
+    )
 
     if pts_nurbs_filtered.shape[0] > args.n_sample_nurbs:
         idx = np.random.choice(
