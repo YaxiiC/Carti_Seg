@@ -83,7 +83,7 @@ def _points_to_mask(
 
     # Morphological closing implemented with torch convolutions to avoid SciPy
     tensor = torch.from_numpy(mask[None, None].astype(np.float32))
-    kernel = torch.ones((1, 1, 3, 3, 3), dtype=torch.float32)
+    kernel = torch.ones((1, 1, 2, 2, 2), dtype=torch.float32)
     for _ in range(dilation_iters):
         tensor = (F.conv3d(tensor, kernel, padding=1) > 0).float()
     for _ in range(dilation_iters):
@@ -253,7 +253,7 @@ def _evaluate_single(
     vis_full_volume: bool = False,
     vis_case_idx: int | None = None,
     fill_solid: bool = True,
-    dilation_iters: int = 13,
+    dilation_iters: int = 5,
 ) -> Tuple[float, float]:
     vol_img = nib.load(str(volume_path))
     seg_img = nib.load(str(seg_path))
@@ -366,7 +366,7 @@ def evaluate_model(
     vis_num_slices: int = 3,
     vis_full_volume: bool = False,
     fill_solid: bool = True,
-    dilation_iters: int = 13,
+    dilation_iters: int = 5,
 ) -> None:
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
