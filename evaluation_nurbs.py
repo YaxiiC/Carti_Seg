@@ -174,6 +174,38 @@ def dice_score(pred: np.ndarray, target: np.ndarray) -> float:
     return 2.0 * intersection / denom if denom > 0 else 0.0
 
 
+def _chunked_min_dist(
+    src: torch.Tensor, dst: torch.Tensor, chunk_size: int = 4096
+) -> torch.Tensor:
+    """Return per-point min distances from ``src`` to ``dst`` using chunked cdist.
+
+    Computing a full pairwise distance matrix is prohibitively memory intensive for
+    dense masks (hundreds of thousands of voxels). Chunking both dimensions keeps
+    intermediate tensors small while producing the same result as a full cdist.
+    """
+
+    min_dists: torch.Tensor | None = None
+    for dst_start in range(0, dst.shape[0], chunk_size):
+        dst_chunk = dst[dst_start : dst_start + chunk_size]
+        dist_chunk = torch.cdist(src, dst_chunk)
+        min_chunk = dist_chunk.min(dim=1).values
+        if min_dists is None:
+            min_dists = min_chunk
+        else:
+            min_dists = torch.minimum(min_dists, min_chunk)
+    return min_dists if min_dists is not None else torch.empty(0)
+
+
+def _directed_hausdorff(pred_t: torch.Tensor, tgt_t: torch.Tensor) -> float:
+    """Compute directed Hausdorff distance from ``pred_t`` to ``tgt_t``."""
+
+    if tgt_t.numel() == 0:
+        return float("inf")
+
+    min_dists = _chunked_min_dist(pred_t, tgt_t)
+    return float(min_dists.max().item()) if min_dists.numel() > 0 else float("inf")
+
+
 def hausdorff_distance(pred: np.ndarray, target: np.ndarray) -> float:
     """Compute the symmetric Hausdorff distance between two binary masks."""
 
@@ -184,9 +216,9 @@ def hausdorff_distance(pred: np.ndarray, target: np.ndarray) -> float:
 
     pred_t = torch.from_numpy(pred_pts.astype(np.float32))
     tgt_t = torch.from_numpy(tgt_pts.astype(np.float32))
-    dist = torch.cdist(pred_t, tgt_t)
-    forward = dist.min(dim=1).values.max().item()
-    backward = dist.min(dim=0).values.max().item()
+
+    forward = _directed_hausdorff(pred_t, tgt_t)
+    backward = _directed_hausdorff(tgt_t, pred_t)
     return max(forward, backward)
 
 
