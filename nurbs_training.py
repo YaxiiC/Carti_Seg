@@ -24,7 +24,7 @@ from skimage import measure
 
 
 # 固定的长轴方向（与 fit_nurbs_from_central_template_2patch.py 保持一致），用于两 patch 模板的排列
-PC_LONG = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+PC_LONG = np.array([1.0, 0.0, 0.0], dtype=np.float64)
 
 ROI_FEMUR = 1
 ROI_FEMORAL_CARTILAGE = 2

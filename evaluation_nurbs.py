@@ -255,6 +255,7 @@ def _evaluate_single(
     device: torch.device,
     template_points: np.ndarray,
     max_dist_on_template: float,
+    template_bbox_margin: float,
     vis_out_dir: Path | None = None,
     vis_num_slices: int = 3,
     vis_full_volume: bool = False,
@@ -282,6 +283,19 @@ def _evaluate_single(
 
     # Move to CPU and drop batch dimension
     pred_points_np = pred_points.squeeze(0).cpu().numpy()
+    bb_min = template_points.min(axis=0)
+    bb_max = template_points.max(axis=0)
+    bbox_mask = np.all(
+        (pred_points_np >= bb_min - template_bbox_margin)
+        & (pred_points_np <= bb_max + template_bbox_margin),
+        axis=1,
+    )
+    n_before_bbox = pred_points_np.shape[0]
+    pred_points_np = pred_points_np[bbox_mask]
+    print(
+        f"Filtered predicted NURBS samples (bbox): {pred_points_np.shape[0]} / {n_before_bbox} "
+        f"within template bbox ± {template_bbox_margin} mm",
+    )
     n_pred_all = pred_points_np.shape[0]
     pred_points_np = filter_points_near_template(
         pred_points_np,
@@ -386,6 +400,7 @@ def evaluate_model(
     dilation_iters: int = 5,
     template_points: np.ndarray | None = None,
     max_dist_on_template: float = DEFAULT_MAX_DIST_ON_TEMPLATE,
+    template_bbox_margin: float = 10.0,
 ) -> None:
     if template_points is None:
         raise ValueError("template_points must be provided for distance filtering.")
@@ -416,6 +431,7 @@ def evaluate_model(
             device,
             template_points,
             max_dist_on_template,
+            template_bbox_margin,
             vis_out_dir=vis_out_dir,
             vis_num_slices=vis_num_slices,
             vis_full_volume=vis_full_volume,
@@ -548,6 +564,12 @@ if __name__ == "__main__":
         default=DEFAULT_MAX_DIST_ON_TEMPLATE,
         help="Maximum distance (mm) from template surface to keep NURBS samples.",
     )
+    parser.add_argument(
+        "--template-bbox-margin",
+        type=float,
+        default=10.0,
+        help="Margin (mm) around template bounding box for keeping NURBS samples.",
+    )
     args = parser.parse_args()
 
     # create device from gpu id
@@ -595,4 +617,5 @@ if __name__ == "__main__":
         dilation_iters=args.dilation_iters,
         template_points=template_points,
         max_dist_on_template=args.max_dist_on_template,
+        template_bbox_margin=args.template_bbox_margin,
     )
