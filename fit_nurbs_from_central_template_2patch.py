@@ -27,10 +27,9 @@ and verify the fitting accuracy in 3D via Chamfer distance.
 Example:
 
 python fit_nurbs_from_central_template_2patch.py ^
-  --roi 5 ^
-  --central_mesh C:\Users\chris\MICCAI2026\Carti_Seg\lateral_tibial_cartilage_average_mesh.ply ^
+  --roi 2 ^
+  --central_mesh C:\Users\chris\MICCAI2026\Carti_Seg\femoral_cartilage_average_mesh.ply ^
   --out_dir      C:\Users\chris\MICCAI2026\Carti_Seg ^
-  --size_u 30 --size_v 30 ^
   --n_patches 2
 """
 
@@ -195,7 +194,7 @@ def split_mesh_longitudinal(
     verts_centered = verts - center
 
     # 固定“长轴方向”为世界坐标 Y 轴（与现有实现保持一致）
-    pc_long = np.array([0.0, 1.0, 0.0], dtype=np.float64)
+    pc_long = np.array([1.0, 0.0, 0.0], dtype=np.float64)
 
     # 顶点在固定长轴上的投影
     proj = verts_centered @ pc_long  # (N,)

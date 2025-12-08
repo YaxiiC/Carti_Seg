@@ -10,12 +10,11 @@ Visualize central template mesh and multi-patch NURBS surfaces.
 Usage example (Windows CMD):
 
   python visualize_nurbs_multipatch.py ^
-    --roi 5 ^
-    --central_mesh  C:\Users\chris\MICCAI2026\Carti_Seg\lateral_tibial_cartilage_average_mesh.ply ^
+    --roi 2 ^
+    --central_mesh  C:\Users\chris\MICCAI2026\Carti_Seg\femoral_cartilage_average_mesh.ply ^
     --out_dir       C:\Users\chris\MICCAI2026\Carti_Seg ^
     --n_patches     2 ^
     --bbox_margin   10.0 ^
-    --n_u 40 --n_v 40 ^
     --show_ctrlmesh
 
 要求：fit 脚本已经在 out_dir 下生成
