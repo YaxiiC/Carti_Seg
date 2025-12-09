@@ -147,6 +147,15 @@ def _fill_solid(mask: np.ndarray) -> np.ndarray:
     return filled.astype(np.uint8)
 
 
+def _template_ctrl_points(template: NURBSTemplate | MultiPatchNURBSTemplate) -> np.ndarray:
+    """Return a flattened array of control points from a template."""
+
+    if isinstance(template, MultiPatchNURBSTemplate):
+        ctrl = [t.ctrlpts.reshape(-1, 3).detach().cpu().numpy() for t in template.templates]
+        return np.concatenate(ctrl, axis=0)
+    return template.ctrlpts.reshape(-1, 3).detach().cpu().numpy()
+
+
 def _compute_bbox(mask: np.ndarray, margin: int) -> Tuple[int, int, int, int, int, int]:
     coords = np.argwhere(mask > 0)
     if coords.size == 0:
@@ -402,14 +411,24 @@ def evaluate_model(
     max_dist_on_template: float = DEFAULT_MAX_DIST_ON_TEMPLATE,
     template_bbox_margin: float = 10.0,
 ) -> None:
-    if template_points is None:
-        raise ValueError("template_points must be provided for distance filtering.")
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if len(template_paths) == 1:
         template: NURBSTemplate | MultiPatchNURBSTemplate = NURBSTemplate.from_npz(template_paths[0], device)
     else:
         template = MultiPatchNURBSTemplate.from_paths(template_paths, device)
+
+    if template_points is None:
+        template_points = _template_ctrl_points(template)
+        print(
+            "Using template control points for bbox/dist filtering "
+            f"({template_points.shape[0]} points)."
+        )
+    else:
+        template_points = np.asarray(template_points)
+        print(
+            f"Using user-provided template samples for filtering ({template_points.shape[0]} points)."
+        )
 
     model = _build_model(template, predict_weights, device)
     ckpt = _load_checkpoint(model, checkpoint_path, device)
@@ -550,13 +569,13 @@ if __name__ == "__main__":
         "--template-mesh",
         type=Path,
         default=None,
-        help="Template mesh (.ply) used to filter predicted NURBS samples (defaults to <roi_name>_average_mesh.ply).",
+        help="Optional template mesh (.ply) used to filter predicted NURBS samples.",
     )
     parser.add_argument(
         "--n-template-points",
         type=int,
         default=20000,
-        help="Number of points sampled on template mesh for filtering.",
+        help="Number of points sampled on template mesh for filtering (only if template mesh is provided).",
     )
     parser.add_argument(
         "--max-dist-on-template",
@@ -592,14 +611,15 @@ if __name__ == "__main__":
     template_paths = args.templates or default_template_paths(roi_name, n_patches=args.n_patches)
     checkpoint_path = args.checkpoint or Path(f"{roi_name}_best_model.pth")
     roi_label = args.roi_label if args.roi_label is not None else roi_id
-    template_mesh = args.template_mesh or Path(f"{roi_name}_average_mesh.ply")
-    template_points = sample_template_points(
-        template_mesh, n_points=args.n_template_points
-    )
-    print(
-        f"Sampled {template_points.shape[0]} template points from {template_mesh} "
-        f"for distance filtering (max_dist_on_template={args.max_dist_on_template} mm)."
-    )
+    template_points = None
+    if args.template_mesh is not None:
+        template_points = sample_template_points(
+            args.template_mesh, n_points=args.n_template_points
+        )
+        print(
+            f"Sampled {template_points.shape[0]} template points from {args.template_mesh} "
+            f"for distance filtering (max_dist_on_template={args.max_dist_on_template} mm)."
+        )
 
     evaluate_model(
         checkpoint_path=checkpoint_path,
