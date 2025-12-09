@@ -6,7 +6,7 @@ import numpy as np
 import open3d as o3d
 from scipy.spatial import cKDTree
 
-DEFAULT_MAX_DIST_ON_TEMPLATE = 0.5  # mm
+DEFAULT_MAX_DIST_ON_TEMPLATE = 30  # mm
 
 
 def filter_points_near_template(
