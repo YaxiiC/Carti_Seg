@@ -51,7 +51,25 @@ def _load_checkpoint(model: torch.nn.Module, checkpoint_path: Path, device: torc
     model.load_state_dict(state_dict)
     return ckpt
 
+def _make_ball_kernel(radius: int = 1, device: torch.device | None = None) -> torch.Tensor:
+    """
+    创建 3D 球形结构元，半径为 radius（单位：voxel）。
+    返回形状为 (1, 1, D, H, W) 的卷积 kernel，用于二值膨胀/腐蚀。
+    """
+    if device is None:
+        device = torch.device("cpu")
 
+    # 网格坐标：[-r, r]
+    coords = torch.arange(-radius, radius + 1, device=device)
+    zz, yy, xx = torch.meshgrid(coords, coords, coords, indexing="ij")
+    dist2 = zz**2 + yy**2 + xx**2
+
+    # 球：距离原点 <= radius 的点
+    ball = (dist2 <= radius**2).to(torch.float32)  # (D, H, W)
+    # 形状匹配 conv3d: (out_channels, in_channels, D, H, W)
+    kernel = ball.view(1, 1, *ball.shape)
+    return kernel
+    
 def _points_to_mask(
     points: np.ndarray,
     volume_shape: Tuple[int, int, int],
@@ -59,14 +77,10 @@ def _points_to_mask(
     dilation_iters: int = 5,
     fill_solid: bool = True,
 ) -> np.ndarray:
-    """Rasterize a point cloud onto a voxel grid and apply light smoothing.
+    """Rasterize a point cloud onto a voxel grid and apply morphological closing.
 
-    The default behavior now generates a *solid* mask from the predicted surface
-    samples. During early experiments the voxelization step only produced a
-    thin shell for cartilage classes, which severely deflated Dice scores even
-    when the surface geometry was reasonable. Filling the closed surface volume
-    ensures the voxel mask matches the ground-truth topology used for training
-    and metrics.
+    使用球形结构元做多次膨胀 + 多次腐蚀（closing），然后可选进行 3D 填充，
+    得到与 GT 拓扑更接近的实体 mask。
     """
 
     mask = np.zeros(volume_shape, dtype=np.uint8)
@@ -86,14 +100,25 @@ def _points_to_mask(
     )
     mask[z_idx[valid], y_idx[valid], x_idx[valid]] = 1
 
-    # Morphological closing implemented with torch convolutions to avoid SciPy
+    # ---- 形态学 closing：球形结构元 + 多次膨胀 / 腐蚀 ----
+    # tensor: (B=1, C=1, D, H, W)
     tensor = torch.from_numpy(mask[None, None].astype(np.float32))
-    kernel = torch.ones((1, 1, 3, 3, 3), dtype=torch.float32)
+
+    radius = 2  # 你可以之后改成 2 试试更平滑的效果
+    kernel = _make_ball_kernel(radius=radius, device=tensor.device)
+    padding = radius
+    kernel_sum = float(kernel.sum().item())
+
+    # 多次膨胀（dilation）
     for _ in range(dilation_iters):
-        tensor = (F.conv3d(tensor, kernel, padding=1) > 0).float()
-    #for _ in range(dilation_iters):
-    #    tensor = (F.conv3d(tensor, kernel, padding=1) >= kernel.numel()).float()
+        tensor = (F.conv3d(tensor, kernel, padding=padding) > 0).float()
+
+    # 多次腐蚀（erosion）
+    for _ in range(dilation_iters):
+        tensor = (F.conv3d(tensor, kernel, padding=padding) >= kernel_sum).float()
+
     shell = tensor.squeeze().numpy().astype(np.uint8)
+
     if fill_solid:
         return _fill_solid(shell)
     return shell
