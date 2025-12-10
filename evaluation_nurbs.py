@@ -91,8 +91,8 @@ def _points_to_mask(
     kernel = torch.ones((1, 1, 3, 3, 3), dtype=torch.float32)
     for _ in range(dilation_iters):
         tensor = (F.conv3d(tensor, kernel, padding=1) > 0).float()
-    for _ in range(dilation_iters):
-        tensor = (F.conv3d(tensor, kernel, padding=1) >= kernel.numel()).float()
+    #for _ in range(dilation_iters):
+    #    tensor = (F.conv3d(tensor, kernel, padding=1) >= kernel.numel()).float()
     shell = tensor.squeeze().numpy().astype(np.uint8)
     if fill_solid:
         return _fill_solid(shell)
